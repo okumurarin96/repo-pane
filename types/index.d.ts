@@ -32,7 +32,12 @@ export type RepoStatus = {
   worktrees: WorktreeStatus[]
   fetchError: string | null
   error: string | null
+  /** The folder is gone (renamed, moved or deleted); `remote` is the last one seen there. */
+  isMissing: boolean
 }
+
+/** The provider said a remote moved (repo renamed or transferred): where to, in the remote's own URL style. */
+export type RemoteMove = { remote: string; from: string; to: string }
 
 export type FetchInfo = { at: number | null; isRunning: boolean; failed: number }
 
@@ -260,6 +265,12 @@ declare module 'claude-code' {
       ssh: SshState
       /** Where each account can create repos (orgs, workspaces, groups), by account id. */
       owners: Record<string, string[]>
+      /** Remotes the provider reported as moved, by repo path. */
+      moves: Record<string, RemoteMove>
+      /** Repos on the signed-in accounts that may replace a dead remote, by repo path. */
+      replacements: Record<string, RemoteRepo[]>
+      /** Folders found that may be where a missing repo went, by its old path. */
+      relocations: Record<string, string[]>
     }
   }
 }

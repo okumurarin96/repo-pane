@@ -213,6 +213,46 @@ export function credentialRewriteArgs(remoteV: string, accounts: readonly NetAcc
   return [...rewrites].flatMap(([prefix, to]) => ['-c', `url.${to}.insteadOf=${prefix}`])
 }
 
+/**
+ * `-c` flags that let git only read saved credentials: the configured helpers are replaced, for this command,
+ * by one that answers `get` through `git credential fill` (the configured helpers, e.g. the macOS Keychain) and
+ * ignores `store` and `erase`. Git erases a credential the server refused; with this, a failed sign-in never
+ * deletes the token the person saved.
+ */
+export const READ_ONLY_CREDENTIALS = [
+  '-c', 'credential.helper=',
+  '-c', 'credential.helper=!f() { test "$1" = get || exit 0; env -u GIT_CONFIG_PARAMETERS git credential fill; }; f',
+]
+
+/**
+ * Where a provider says a remote went: GitHub's "This repository moved. Please use the new location: <url>",
+ * or git's own "warning: redirecting to <url>" after an http redirect (GitLab, GitHub, Bitbucket alike).
+ */
+export function parseMovedNotice(stderr: string): string | null {
+  const moved = /This repository moved\.\s*Please use the new location:\s*(?:remote:\s*)*(\S+)/i.exec(stderr)
+  const redirect = /warning: redirecting to (\S+)/i.exec(stderr)
+  const url = moved?.[1] ?? redirect?.[1]
+  if (!url) return null
+  // a redirect names the smart-http endpoint; the repo is what comes before it
+  return url.replace(/\/(info\/refs.*|git-upload-pack.*|git-receive-pack.*)$/, '').replace(/\/+$/, '')
+}
+
+/** A new location written the way the old remote was: SSH stays SSH, an https user name is kept. */
+export function rewriteRemoteUrl(oldUrl: string, newUrl: string): string | null {
+  const next = parseRemoteUrl(newUrl)
+  if (!next) return null
+  const path = next.path.replace(/\.git$/, '')
+  const old = oldUrl.trim()
+  if (/^(git@|ssh:\/\/)/.test(old)) return `git@${next.host}:${path}.git`
+  const user = /^https?:\/\/([^@/]+)@/.exec(old)?.[1]
+  return `https://${user ? `${user}@` : ''}${next.host}/${path}.git`
+}
+
+/** Whether a fetch error means the remote repo is gone or out of reach (renamed, transferred, deleted, no access). */
+export function isRemoteGone(text: string): boolean {
+  return /Repository not found|repository .* not found|does not exist|You may not have access|Could not read from remote|HTTP 404|not found|không có quyền truy cập repo/i.test(text)
+}
+
 /** The hosts a repo's remotes point at. */
 export function remoteHosts(remoteV: string): string[] {
   const hosts = new Set<string>()

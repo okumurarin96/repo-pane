@@ -3,14 +3,14 @@ import type { EngineInterface, Register } from 'claude-code'
 
 import type {
   Account, AccountForm, ChangedFile, Confirm, DiffView, FetchInfo, FlowConfig, FlowKind, OAuthApp, OAuthProgress,
-  GitProtocol, OpState, Panel, Provider, RemoteList, RemoteRepo, RepoSettings, RepoStatus, RepoTab, Result, ScanResult,
+  GitProtocol, OpState, RemoteMove, Panel, Provider, RemoteList, RemoteRepo, RepoSettings, RepoStatus, RepoTab, Result, ScanResult,
   Selection, SignInMethod, SshState, View, WorktreeStatus,
 } from '../types'
 import { FLOW_KINDS, finishSteps, flowBase, flowConfigArgs, flowDefaults, flowKindOf, parseFlowConfig } from './flow'
 import type { FlowStep } from './flow'
 import {
   BRANCH_FORMAT, LOG_FORMAT, REMOTE_BRANCH_FORMAT, STASH_FORMAT, TAG_FORMAT, accountForHost, ago, cloneFolder,
-  credentialRewriteArgs, parseKeyFingerprint, remoteHosts, sshArgv, sshCommand, sshGreeting,
+  READ_ONLY_CREDENTIALS, credentialRewriteArgs, isRemoteGone, parseMovedNotice, rewriteRemoteUrl, parseKeyFingerprint, remoteHosts, sshArgv, sshCommand, sshGreeting,
   diffHunks, explainNetworkError, isAuthError, isClean, isValidRemoteUrl, parseBranches, parseLog, parseRemoteBranches,
   parseRemoteUrl, parseRemotes, parseStashes, parseStatus, parseTags, parseWorktreeList, remoteKey, shortDate,
   sshRewriteArgs, truncateLines, worktreeFolder, worktreeLabel,
@@ -55,6 +55,9 @@ const oauthApps = atom({ plugin: 'repo-pane', key: 'oauthApps' } as const, [] as
 const oauth = atom({ plugin: 'repo-pane', key: 'oauth' } as const, null as OAuthProgress | null)
 const scan = atom({ plugin: 'repo-pane', key: 'scan' } as const, { isLoading: false, root: '', found: [] } as ScanResult)
 const owners = atom({ plugin: 'repo-pane', key: 'owners' } as const, {} as Record<string, string[]>)
+const moves = atom({ plugin: 'repo-pane', key: 'moves' } as const, {} as Record<string, RemoteMove>)
+const replacements = atom({ plugin: 'repo-pane', key: 'replacements' } as const, {} as Record<string, RemoteRepo[]>)
+const relocations = atom({ plugin: 'repo-pane', key: 'relocations' } as const, {} as Record<string, string[]>)
 
 // No prompts from git: a command that needs credentials fails instead of hanging.
 const GIT_ENV = {
@@ -74,8 +77,15 @@ let cfg: Config = { repos: [], cloneDir: '', useSsh: true, home: '', apps: [] }
 let extraRepos: string[] = []
 let isRefreshing = false
 
+/** Repos from the settings moved to another folder from the pane (old path → new), and ones hidden there. */
+let pathMoves: Record<string, string> = {}
+let hiddenRepos: string[] = []
+
+/** Every watched repo: the settings' list (moved where the pane moved them) and the pane's own, less the hidden. */
 function allPaths(): string[] {
-  return [...cfg.repos, ...extraRepos.filter(p => !cfg.repos.includes(p))]
+  const configured = cfg.repos.map(p => pathMoves[p] ?? p)
+  const all = [...configured, ...extraRepos]
+  return all.filter((p, i) => all.indexOf(p) === i && !hiddenRepos.includes(p))
 }
 
 function lastLine(text: string): string {
@@ -112,12 +122,228 @@ async function gitNet($: EngineInterface, cwd: string, args: string[], timeoutMs
   await refreshExpiring($)
   const remoteV = (await git($, cwd, ['remote', '-v'])).stdout
   const list = await read($, accounts)
-  const creds = credentialRewriteArgs(remoteV, list)
-  const env = sshEnvFor(list, remoteHosts(remoteV))
+  const creds = [...READ_ONLY_CREDENTIALS, ...credentialRewriteArgs(remoteV, list)]
+  const hosts = remoteHosts(remoteV)
+  const env = sshEnvFor(list, hosts)
   const first = await git($, cwd, [...creds, ...args], timeoutMs, undefined, env)
-  if (first.exitCode === 0 || !cfg.useSsh || !isAuthError(first.stderr)) return first
+  const movedTo = parseMovedNotice(first.stderr)
+  if (movedTo) await recordMove($, cwd, remoteV, movedTo)
+  if (first.exitCode === 0 || !isAuthError(first.stderr)) return first
+  await markRefused($, hosts)
+  if (!cfg.useSsh) return first
   const rewrite = sshRewriteArgs(remoteV)
-  return rewrite.length ? git($, cwd, [...rewrite, ...args], timeoutMs, undefined, env) : first
+  return rewrite.length ? git($, cwd, [...READ_ONLY_CREDENTIALS, ...rewrite, ...args], timeoutMs, undefined, env) : first
+}
+
+/** The watched repo a worktree path belongs to. */
+async function repoPathFor($: EngineInterface, cwd: string): Promise<string> {
+  const owner = (await read($, repos)).find(r => r.path === cwd || r.worktrees.some(w => w.path === cwd))
+  return owner?.path ?? cwd
+}
+
+/**
+ * Records that the provider reported a remote's new location: the remote on the same host (origin first),
+ * the new URL written in its own style. Shown with an "update the URL" button until applied or dismissed.
+ */
+async function recordMove($: EngineInterface, cwd: string, remoteV: string, movedTo: string) {
+  const target = parseRemoteUrl(movedTo)
+  if (!target) return
+  const remotesList = parseRemotes(remoteV)
+  const sameHost = remotesList.filter(r => parseRemoteUrl(r.fetchUrl)?.host === target.host)
+  const rm = sameHost.find(r => r.name === 'origin') ?? sameHost[0]
+  if (!rm) return
+  const to = rewriteRemoteUrl(rm.fetchUrl, movedTo)
+  if (!to || remoteKey(to) === remoteKey(rm.fetchUrl)) return
+  const repoPath = await repoPathFor($, cwd)
+  await update($, moves, m => ({ ...m, [repoPath]: { remote: rm.name, from: rm.fetchUrl, to } }))
+}
+
+async function applyMove($: EngineInterface, repoPath: string) {
+  const mv = (await read($, moves))[repoPath]
+  if (!mv) return
+  const ok = await act($, repoPath, `Cập nhật ${mv.remote} → ${mv.to}`, ['remote', 'set-url', mv.remote, mv.to])
+  if (ok) await dismissMove($, repoPath)
+}
+
+async function dismissMove($: EngineInterface, repoPath: string) {
+  await update($, moves, m => {
+    const next = { ...m }
+    delete next[repoPath]
+    return next
+  })
+}
+
+/** Tries every remote of a repo: a moved one is recorded, a dead one gets replacement suggestions. */
+async function checkRemoteLinks($: EngineInterface, repoPath: string) {
+  await setBusy($, repoPath, 'Kiểm tra link remote')
+  const lines: string[] = []
+  let gone = false
+  try {
+    const remotesList = parseRemotes((await git($, repoPath, ['remote', '-v'])).stdout)
+    if (remotesList.length === 0) lines.push('Repo chưa có remote nào.')
+    for (const rm of remotesList) {
+      const r = await gitNet($, repoPath, ['ls-remote', '--heads', rm.name], 60_000)
+      const moved = parseMovedNotice(r.stderr)
+      if (r.exitCode === 0) {
+        lines.push(moved ? `○ ${rm.name}: đã chuyển tới ${moved}` : `✓ ${rm.name}: còn dùng được`)
+      } else {
+        const why = explainNetworkError(lastLine(r.stderr))
+        if (isRemoteGone(r.stderr) && rm.name === 'origin') gone = true
+        lines.push(`✗ ${rm.name}: ${why}`)
+      }
+    }
+    await update($, result, () => ({ label: 'Kiểm tra link remote', ok: !gone, text: lines.join('\n'), at: Date.now() }))
+  } finally {
+    await setBusy($, repoPath, null)
+  }
+  if (gone) await findReplacements($, repoPath)
+}
+
+/** Repos with the same name on the signed-in accounts: where a dead origin may now live. */
+async function findReplacements($: EngineInterface, repoPath: string) {
+  const origin = await git($, repoPath, ['remote', 'get-url', 'origin'])
+  const oldKey = origin.exitCode === 0 ? remoteKey(origin.stdout) : null
+  const slug = (oldKey ?? repoPath).split('/').pop()?.toLowerCase() ?? ''
+  if ((await read($, remote)).at == null) await loadRemote($)
+  const found = (await read($, remote)).repos.filter(r => r.slug === slug && r.key !== oldKey).slice(0, 6)
+  await update($, replacements, x => ({ ...x, [repoPath]: found }))
+  if (found.length === 0) {
+    void $.ui.toast(`Không thấy repo "${slug}" trong các tài khoản đã đăng nhập: sửa URL tay ở tab Cài đặt`)
+  }
+}
+
+async function useReplacement($: EngineInterface, repoPath: string, key: string) {
+  const rr = ((await read($, replacements))[repoPath] ?? []).find(r => r.key === key)
+  if (!rr) return
+  const origin = await git($, repoPath, ['remote', 'get-url', 'origin'])
+  const old = origin.exitCode === 0 ? origin.stdout.trim() : rr.httpsUrl
+  const to = rewriteRemoteUrl(old, rr.httpsUrl) ?? rr.httpsUrl
+  const ok = await act($, repoPath, `Đổi origin → ${rr.fullName}`, ['remote', 'set-url', 'origin', to])
+  if (ok) {
+    await update($, replacements, x => {
+      const next = { ...x }
+      delete next[repoPath]
+      return next
+    })
+    await fetchOne($, repoPath)
+  }
+}
+
+// ── missing folders ──
+
+async function savePathState($: EngineInterface) {
+  await $.store.set('pathMoves', pathMoves)
+  await $.store.set('hiddenRepos', hiddenRepos)
+  await saveExtra($)
+}
+
+/** Points a watched repo at its new folder: an added repo is replaced, a repo from the settings is remapped. */
+async function relocate($: EngineInterface, oldPath: string, nextIn?: string) {
+  const d = await read($, drafts)
+  const next = (nextIn ?? d[`relocate:${oldPath}`] ?? '').trim().replace(/\/+$/, '')
+  if (!next.startsWith('/')) {
+    void $.ui.toast('Nhập đường dẫn tuyệt đối tới thư mục mới')
+    return
+  }
+  const top = await git($, next, ['rev-parse', '--show-toplevel'])
+  if (top.exitCode !== 0) {
+    void $.ui.toast(`${next} không phải git repo`)
+    return
+  }
+  const to = top.stdout.trim()
+  if (extraRepos.includes(oldPath)) extraRepos = extraRepos.map(p => (p === oldPath ? to : p))
+  const source = Object.keys(pathMoves).find(k => pathMoves[k] === oldPath) ?? (cfg.repos.includes(oldPath) ? oldPath : null)
+  if (source) pathMoves = { ...pathMoves, [source]: to }
+  if (!source && !extraRepos.includes(to)) extraRepos = [...extraRepos, to]
+  await savePathState($)
+  await setDraft($, `relocate:${oldPath}`, '')
+  await update($, relocations, x => {
+    const n = { ...x }
+    delete n[oldPath]
+    return n
+  })
+  void $.ui.toast(`Đã chuyển theo dõi sang ${to}`)
+  await refresh($)
+}
+
+/** Looks in the home folder for a repo with the missing one's remote. */
+async function findMovedFolder($: EngineInterface, oldPath: string) {
+  const r = (await read($, repos)).find(x => x.path === oldPath)
+  if (!r?.remote) {
+    void $.ui.toast('Không biết remote của repo này: nhập đường dẫn mới tay')
+    return
+  }
+  await setBusy($, oldPath, 'Tìm thư mục')
+  try {
+    const out = await $.process.run(
+      ['find', cfg.home, '-maxdepth', '3', '(', '-name', 'node_modules', '-o', '-name', 'Library', '-o', '-name', '.Trash', '-o', '-name', 'Pods', ')', '-prune', '-o', '-name', '.git', '-print'],
+      { timeoutMs: 90_000 },
+    ).catch(() => ({ exitCode: 1, stdout: '', stderr: '' }))
+    const dirs = out.stdout.split('\n').filter(Boolean).map(p => p.replace(/\/\.git$/, ''))
+    const matches: string[] = []
+    for (const dir of dirs) {
+      if (allPaths().includes(dir)) continue
+      const o = await git($, dir, ['remote', 'get-url', 'origin'])
+      if (o.exitCode === 0 && remoteKey(o.stdout) === r.remote) matches.push(dir)
+    }
+    await update($, relocations, x => ({ ...x, [oldPath]: matches }))
+    void $.ui.toast(matches.length ? `Tìm thấy ${matches.length} thư mục có cùng remote` : 'Không thấy thư mục nào có cùng remote: nhập đường dẫn mới tay')
+  } finally {
+    await setBusy($, oldPath, null)
+  }
+}
+
+const REFUSED = 'Nhà cung cấp từ chối token khi chạy git: token thiếu quyền repository hoặc username sai — đăng nhập lại'
+const MISSING = 'Không thấy token trong Keychain — đăng nhập lại'
+
+/** Notes on the https accounts of these hosts that the provider refused their token. */
+async function markRefused($: EngineInterface, hosts: readonly string[]) {
+  const list = await read($, accounts)
+  const hit = hosts.map(h => accountForHost(list, h)).filter((a): a is Account => Boolean(a && a.method !== 'ssh' && a.protocol === 'https'))
+  if (hit.length === 0) return
+  const ids = new Set(hit.map(a => a.id))
+  await saveAccounts($, list.map(a => (ids.has(a.id) ? { ...a, error: REFUSED } : a)))
+}
+
+/** Marks the accounts whose token is no longer in the credential store, and clears that mark once it is back. */
+async function checkTokens($: EngineInterface) {
+  const list = await read($, accounts)
+  let changed = false
+  const next: Account[] = []
+  for (const a of list) {
+    if (a.method === 'ssh') {
+      next.push(a)
+      continue
+    }
+    const has = Boolean(await readSecret($, a.host, a.gitUser))
+    const error = has ? (a.error === MISSING ? null : a.error) : MISSING
+    if (error !== a.error) changed = true
+    next.push({ ...a, error })
+  }
+  if (changed) await saveAccounts($, next)
+}
+
+/** Fills the sign-in form from an account, for signing in again. */
+async function relogin($: EngineInterface, id: string) {
+  const a = (await read($, accounts)).find(x => x.id === id)
+  if (!a) return
+  await update($, accountForm, f => ({
+    ...f,
+    provider: a.provider,
+    host: a.host,
+    method: a.method,
+    protocol: a.protocol,
+    sshKey: a.sshKey,
+    username: a.method === 'token' ? a.username : f.username,
+    email: a.email,
+    scopes: a.scopes.join(', '),
+  }))
+  if (a.method === 'ssh' || a.protocol === 'ssh') await loadSshKeys($)
+  void $.ui.toast(
+    a.method === 'oauth' ? `Bấm "Đăng nhập ${providerLabel(a.provider)} bằng trình duyệt" bên dưới`
+      : a.method === 'token' ? 'Đã điền sẵn: copy token mới (đủ quyền repository) rồi bấm Đăng nhập bằng token trong clipboard'
+        : 'Đã điền sẵn: kiểm tra key và thêm lại tài khoản',
+  )
 }
 
 /** GIT_SSH_COMMAND carrying the key of the account for one of these hosts, when it has its own key. */
@@ -175,19 +401,26 @@ async function readWorktree($: EngineInterface, repoPath: string, wtPath: string
   return parseStatus(r.stdout, wtPath, label)
 }
 
-async function readRepo($: EngineInterface, path: string, fetchError: string | null): Promise<RepoStatus> {
+async function readRepo($: EngineInterface, path: string, fetchError: string | null, lastRemote: string | null = null): Promise<RepoStatus> {
   const name = path.split('/').pop() || path
+  const exists = await $.process.run(['test', '-d', path]).catch(() => ({ exitCode: 1 }))
+  if (exists.exitCode !== 0) {
+    return {
+      name, path, remote: lastRemote, worktrees: [], fetchError: null, isMissing: true,
+      error: 'Không thấy thư mục này nữa: đã đổi tên, di chuyển hoặc xoá',
+    }
+  }
   const [list, origin] = await Promise.all([
     git($, path, ['worktree', 'list', '--porcelain']),
     git($, path, ['remote', 'get-url', 'origin']),
   ])
   const key = origin.exitCode === 0 ? remoteKey(origin.stdout) : null
   if (list.exitCode !== 0) {
-    return { name, path, remote: key, worktrees: [], fetchError, error: lastLine(list.stderr) || 'không phải git repo' }
+    return { name, path, remote: key, worktrees: [], fetchError, isMissing: false, error: lastLine(list.stderr) || 'không phải git repo' }
   }
   const entries = parseWorktreeList(list.stdout).filter(w => !w.isBare)
   const worktrees = await Promise.all(entries.map(w => readWorktree($, path, w.path)))
-  return { name, path, remote: key, worktrees, fetchError, error: null }
+  return { name, path, remote: key, worktrees, fetchError, isMissing: false, error: null }
 }
 
 async function refresh($: EngineInterface) {
@@ -195,8 +428,8 @@ async function refresh($: EngineInterface) {
   isRefreshing = true
   try {
     const prev = await read($, repos)
-    const fetchErrors = new Map(prev.map(r => [r.path, r.fetchError]))
-    const list = await Promise.all(allPaths().map(p => readRepo($, p, fetchErrors.get(p) ?? null)))
+    const before = new Map(prev.map(r => [r.path, r]))
+    const list = await Promise.all(allPaths().map(p => readRepo($, p, before.get(p)?.fetchError ?? null, before.get(p)?.remote ?? null)))
     await update($, repos, () => list)
     await update($, refreshedAt, () => Date.now())
     if ((await read($, view)) === 'repo') await loadPanel($, false)
@@ -213,7 +446,7 @@ async function refreshFor($: EngineInterface, cwd: string) {
     await refresh($)
     return
   }
-  const fresh = await readRepo($, owner.path, owner.fetchError)
+  const fresh = await readRepo($, owner.path, owner.fetchError, owner.remote)
   await update($, repos, cur => cur.map(r => (r.path === owner.path ? fresh : r)))
   const sel = await read($, selected)
   if (sel?.repo === owner.path) {
@@ -313,7 +546,9 @@ async function readSettings($: EngineInterface, path: string): Promise<RepoSetti
 // ── fetch / pull / push ────────────────────────────────────────────────────
 
 async function fetchRepo($: EngineInterface, path: string): Promise<string | null> {
-  const r = await gitNet($, path, ['fetch', '--all', '--prune', '--quiet'])
+  if ((await $.process.run(['test', '-d', path]).catch(() => ({ exitCode: 1 }))).exitCode !== 0) return null
+  // not --quiet: the provider's "repository moved" notice comes on stderr (gitNet records it)
+  const r = await gitNet($, path, ['fetch', '--all', '--prune'])
   return r.exitCode === 0 ? null : explainNetworkError(lastLine(r.stderr) || `exit ${r.exitCode}`)
 }
 
@@ -391,7 +626,10 @@ async function showView($: EngineInterface, next: View) {
   await update($, view, () => next)
   await update($, confirm, () => null)
   if (next === 'remote' && (await read($, remote)).at == null) await loadRemote($)
-  if (next === 'accounts') await loadSshKeys($)
+  if (next === 'accounts') {
+    await loadSshKeys($)
+    await checkTokens($)
+  }
 }
 
 async function setDraft($: EngineInterface, key: string, value: string) {
@@ -746,6 +984,10 @@ async function saveExtra($: EngineInterface) {
 }
 
 async function watch($: EngineInterface, path: string) {
+  if (hiddenRepos.includes(path)) {
+    hiddenRepos = hiddenRepos.filter(p => p !== path)
+    await savePathState($)
+  }
   if (!allPaths().includes(path)) {
     extraRepos = [...extraRepos, path]
     await saveExtra($)
@@ -754,9 +996,11 @@ async function watch($: EngineInterface, path: string) {
   await markOnDisk($)
 }
 
+/** Stops watching a repo: an added one is dropped, one from the settings is hidden (the folder is not touched). */
 async function unwatch($: EngineInterface, path: string) {
-  extraRepos = extraRepos.filter(p => p !== path)
-  await saveExtra($)
+  if (extraRepos.includes(path)) extraRepos = extraRepos.filter(p => p !== path)
+  else if (!hiddenRepos.includes(path)) hiddenRepos = [...hiddenRepos, path]
+  await savePathState($)
   if ((await read($, selected))?.repo === path) {
     await update($, selected, () => null)
     await update($, view, () => 'repos' as View)
@@ -1279,20 +1523,59 @@ async function login($: EngineInterface) {
   }
 }
 
-async function verifyAccount($: EngineInterface, id: string) {
+/** Asks the provider (or the SSH host) whether the account still gets in, and records the answer. */
+async function checkAccount($: EngineInterface, id: string): Promise<{ ok: boolean; text: string } | null> {
   const a = (await read($, accounts)).find(x => x.id === id)
-  if (!a) return
+  if (!a) return null
   if (a.method === 'ssh') {
     const t = await testSsh($, a.host, a.sshKey)
     const list = (await read($, accounts)).map(x => (x.id === id ? { ...x, verifiedAt: t.ok ? Date.now() : x.verifiedAt, error: t.ok ? null : 'SSH key không vào được' } : x))
     await saveAccounts($, list)
-    return
+    return { ok: t.ok, text: `${a.username}@${a.host}: ${t.ok ? 'SSH key vào được' : 'SSH key không vào được'}` }
   }
   const token = await tokenOf($, a)
-  const check = token ? await verifyToken($, a, token) : { ok: false, login: '', error: 'Không thấy token trong Keychain' }
+  const check = token ? await verifyToken($, a, token) : { ok: false, login: '', error: MISSING }
   const list = (await read($, accounts)).map(x => (x.id === id ? { ...x, verifiedAt: check.ok ? Date.now() : x.verifiedAt, error: check.error } : x))
   await saveAccounts($, list)
-  void $.ui.toast(check.ok ? `${a.username}@${a.host}: token còn dùng được` : `${a.username}@${a.host}: ${check.error}`)
+  return { ok: check.ok, text: `${a.username}@${a.host}: ${check.ok ? 'token còn dùng được' : check.error}` }
+}
+
+async function verifyAccount($: EngineInterface, id: string) {
+  const r = await checkAccount($, id)
+  if (r) void $.ui.toast(r.text)
+}
+
+/** Re-reads what the open view shows: the repos, the open repo, the remote list, or the accounts. */
+async function refreshView($: EngineInterface) {
+  const current = await read($, view)
+  const label = 'Làm mới'
+  const b = await read($, busy)
+  if (b.refreshView) return
+  await setBusy($, 'refreshView', label)
+  try {
+    if (current === 'repo') {
+      const sel = await read($, selected)
+      if (sel) {
+        await refreshFor($, sel.repo)
+        await loadPanel($, sel.tab === 'prs')
+      }
+    } else if (current === 'remote') {
+      await update($, remote, r => ({ ...r, isLoading: false }))
+      await loadRemote($)
+    } else if (current === 'accounts') {
+      await loadAccounts($)
+      await loadOAuthApps($)
+      await loadSshKeys($)
+      const list = await read($, accounts)
+      const results = await Promise.all(list.map(a => checkAccount($, a.id)))
+      const bad = results.filter(r => r && !r.ok).length
+      void $.ui.toast(list.length === 0 ? 'Chưa có tài khoản nào' : bad ? `${bad}/${list.length} tài khoản có vấn đề` : `Cả ${list.length} tài khoản đều dùng được`)
+    } else {
+      await refresh($)
+    }
+  } finally {
+    await setBusy($, 'refreshView', null)
+  }
 }
 
 async function logout($: EngineInterface, id: string) {
@@ -1506,10 +1789,10 @@ async function clone($: EngineInterface, repo: RemoteRepo) {
   const env = { ...GIT_ENV, ...(account?.sshKey ? { GIT_SSH_COMMAND: sshCommand(account.sshKey) } : {}) }
   await setBusy($, key, 'clone')
   try {
-    let r = await $.process.run(['git', 'clone', '--', url, target], { cwd: cfg.cloneDir, env, timeoutMs: 600_000 })
+    let r = await $.process.run(['git', ...READ_ONLY_CREDENTIALS, 'clone', '--', url, target], { cwd: cfg.cloneDir, env, timeoutMs: 600_000 })
       .catch(err => ({ exitCode: 1, stdout: '', stderr: String(err) }))
     if (r.exitCode !== 0 && !overSsh && cfg.useSsh && isAuthError(r.stderr)) {
-      r = await $.process.run(['git', 'clone', '--', repo.sshUrl, target], { cwd: cfg.cloneDir, env, timeoutMs: 600_000 })
+      r = await $.process.run(['git', ...READ_ONLY_CREDENTIALS, 'clone', '--', repo.sshUrl, target], { cwd: cfg.cloneDir, env, timeoutMs: 600_000 })
         .catch(err => ({ exitCode: 1, stdout: '', stderr: String(err) }))
     }
     await report($, `Clone ${repo.fullName}`, r, `Đã clone ${repo.fullName} vào ${target}`)
@@ -1755,11 +2038,10 @@ async function addRepo($: EngineInterface, pathIn?: string) {
 }
 
 async function watchAll($: EngineInterface, paths: readonly string[]) {
+  hiddenRepos = hiddenRepos.filter(p => !paths.includes(p))
   const fresh = paths.filter(p => !allPaths().includes(p))
-  if (fresh.length) {
-    extraRepos = [...extraRepos, ...fresh]
-    await saveExtra($)
-  }
+  if (fresh.length) extraRepos = [...extraRepos, ...fresh]
+  await savePathState($)
   await refresh($)
 }
 
@@ -2157,8 +2439,13 @@ export const register: Register = (on, options) => {
     if (!cfg.cloneDir) cfg.cloneDir = cfg.home
     const stored = await $.store.get('extraRepos')
     extraRepos = Array.isArray(stored) ? stored.filter((p): p is string => typeof p === 'string') : []
+    const storedMoves = await $.store.get('pathMoves')
+    pathMoves = storedMoves && typeof storedMoves === 'object' ? (storedMoves as Record<string, string>) : {}
+    const storedHidden = await $.store.get('hiddenRepos')
+    hiddenRepos = Array.isArray(storedHidden) ? storedHidden.filter((p): p is string => typeof p === 'string') : []
     await loadAccounts($)
     await loadOAuthApps($)
+    void checkTokens($)
     // first run: nothing watched yet, so offer the repos found in the home folder
     if (allPaths().length === 0 && cfg.home) void scanRepos($, cfg.home)
     void $.ui.open({ id: PANE, title: TITLE })
@@ -2242,6 +2529,62 @@ export const register: Register = (on, options) => {
     const scanned = await read($, scan)
     const sshState = await read($, ssh)
     const ownerLists = await read($, owners)
+    const refreshedAtValue = await read($, refreshedAt)
+    const movesOf = await read($, moves)
+    const replacementsOf = await read($, replacements)
+    const relocationsOf = await read($, relocations)
+
+    /** What changed under a repo: its remote moved or is gone, or its folder is gone; each with its fix. */
+    const repoNotices = (r: RepoStatus) => {
+      const mv = movesOf[r.path]
+      const reps = replacementsOf[r.path]
+      const found = relocationsOf[r.path]
+      const gone = !r.isMissing && Boolean(r.fetchError && isRemoteGone(r.fetchError))
+      if (!mv && !gone && !r.isMissing) return null
+      return (
+        <Box flexDirection="column" paddingLeft={2}>
+          {mv && (
+            <Box flexDirection="row" gap={1} alignItems="center" flexWrap="wrap">
+              <Text color="warning">Repo đã chuyển: {mv.remote} → {mv.to}</Text>
+              <Button key={`mv-apply:${r.path}`} variant="primary" label="Cập nhật URL" onPress={() => void applyMove($, r.path)} />
+              <Button key={`mv-skip:${r.path}`} label="Bỏ qua" plain onPress={() => void dismissMove($, r.path)} />
+            </Box>
+          )}
+          {gone && (
+            <Box flexDirection="column">
+              <Box flexDirection="row" gap={1} alignItems="center" flexWrap="wrap">
+                <Text color="warning">Link remote có thể đã đổi hoặc repo đã bị xoá.</Text>
+                <Button key={`rep-find:${r.path}`} label="Tìm link mới" onPress={() => void findReplacements($, r.path)} />
+                <Button key={`rep-edit:${r.path}`} label="Sửa URL tay" plain onPress={() => void openRepo($, r.path).then(() => setTab($, 'settings'))} />
+              </Box>
+              {reps && reps.map(rr => (
+                <Box flexDirection="row" gap={1} alignItems="center">
+                  <Text dimColor>{providerLabel(rr.provider)}</Text>
+                  <Text>{rr.fullName}</Text>
+                  <Button key={`rep-use:${r.path}:${rr.key}`} label="Dùng link này" plain onPress={() => void useReplacement($, r.path, rr.key)} />
+                </Box>
+              ))}
+            </Box>
+          )}
+          {r.isMissing && (
+            <Box flexDirection="column">
+              <Box flexDirection="row" gap={1} alignItems="center" flexWrap="wrap">
+                {draftInput(`relocate:${r.path}`, 'Thư mục mới', `${cfg.home}/…`, () => void relocate($, r.path))}
+                <Button key={`reloc:${r.path}`} label="Chỉ lại thư mục" onPress={() => void relocate($, r.path)} />
+                <Button key={`reloc-find:${r.path}`} label={busyOf[r.path] === 'Tìm thư mục' ? 'Đang tìm…' : 'Tìm thư mục'} plain onPress={() => void findMovedFolder($, r.path)} />
+                <Button key={`reloc-drop:${r.path}`} label="Bỏ theo dõi" plain onPress={() => void ask($, ['unwatch', r.path].join(SEP), `Bỏ theo dõi ${r.name}?`, 'Chỉ bỏ khỏi danh sách.')} />
+              </Box>
+              {found && found.map(dir => (
+                <Box flexDirection="row" gap={1} alignItems="center">
+                  <Text>{dir}</Text>
+                  <Button key={`reloc-use:${r.path}:${dir}`} label="Dùng thư mục này" plain onPress={() => void relocate($, r.path, dir)} />
+                </Box>
+              ))}
+            </Box>
+          )}
+        </Box>
+      )
+    }
     const Svg = e.surface !== 'terminal' && 'Svg' in ui ? ui.Svg : null
     const now = Date.now()
 
@@ -2293,6 +2636,16 @@ export const register: Register = (on, options) => {
         <Button key="tab-repos" label="Repo trên máy" variant={current === 'repos' || current === 'repo' ? 'primary' : 'secondary'} onPress={() => void showView($, 'repos')} />
         <Button key="tab-remote" label={`Repo trên remote${remoteList.repos.length ? ` (${remoteList.repos.length})` : ''}`} variant={current === 'remote' ? 'primary' : 'secondary'} onPress={() => void showView($, 'remote')} />
         <Button key="tab-accounts" label={`Tài khoản (${accts.length})`} variant={current === 'accounts' ? 'primary' : 'secondary'} onPress={() => void showView($, 'accounts')} />
+        <Button
+          key="refresh-view"
+          hotkey="r"
+          label={busyOf.refreshView ? '⟳ Đang làm mới…' : '⟳ Làm mới'}
+          plain
+          onPress={() => void refreshView($)}
+        />
+        {current !== 'accounts' && current !== 'remote' && refreshedAtValue != null && (
+          <Text dimColor>cập nhật {ago(refreshedAtValue, now)}</Text>
+        )}
       </Box>
     )
 
@@ -2381,9 +2734,10 @@ export const register: Register = (on, options) => {
                 <Text>{a.username}@{a.host}</Text>
                 <Text dimColor>{methodLabel(a.method)} · git qua {a.protocol.toUpperCase()}{a.protocol === 'ssh' ? ` (${keyLabel(a.sshKey)})` : ''}</Text>
                 {a.scopes.length > 0 && <Text dimColor>[{a.scopes.join(', ')}]</Text>}
-                <Text dimColor>{a.error ?? `kiểm tra ${ago(a.verifiedAt, now)}`}</Text>
+                {a.error ? <Text color="error">{a.error}</Text> : <Text dimColor>kiểm tra {ago(a.verifiedAt, now)}</Text>}
               </Box>
               <Box flexDirection="row" gap={1} paddingLeft={2} flexWrap="wrap">
+                {a.error && <Button key={`relogin:${a.id}`} variant="primary" label="Đăng nhập lại" onPress={() => void relogin($, a.id)} />}
                 <Button key={`verify:${a.id}`} label="Kiểm tra" plain onPress={() => void verifyAccount($, a.id)} />
                 {a.method !== 'ssh' && (
                   <Button
@@ -2615,6 +2969,7 @@ export const register: Register = (on, options) => {
             <Button key="act-sourcetree" label="SourceTree" plain onPress={() => void openIn($, cwd, 'sourcetree')} />
           </Box>
           {repo.fetchError && <Text color="error">fetch: {repo.fetchError}</Text>}
+          {repoNotices(repo)}
           {!repo.remote && s && !s.remotes.some(r => r.name === 'origin') && (
             <Box flexDirection="row" gap={1} alignItems="center">
               <Text color="warning">Repo chưa có remote.</Text>
@@ -3085,9 +3440,10 @@ export const register: Register = (on, options) => {
                 )}
               </Box>
             ))}
-            {extraRepos.includes(repo.path) && (
+            <Box flexDirection="row" gap={1} flexWrap="wrap">
+              <Button key="check-links" label={busyOf[repo.path] === 'Kiểm tra link remote' ? 'Đang kiểm tra…' : 'Kiểm tra link remote'} onPress={() => void checkRemoteLinks($, repo.path)} />
               <Button key="unwatch" label="Bỏ theo dõi repo này" onPress={() => void ask($, ['unwatch', repo.path].join(SEP), `Bỏ theo dõi ${repo.name}?`, 'Chỉ bỏ khỏi danh sách, không xoá thư mục.')} />
-            )}
+            </Box>
           </Box>
         )
       }
@@ -3116,7 +3472,6 @@ export const register: Register = (on, options) => {
             {info.failed > 0 ? ` · lỗi ${info.failed}` : ''}
           </Text>
           <Button key="fetch" hotkey="f" onPress={() => void fetchAll($)}>Fetch tất cả</Button>
-          <Button key="refresh" hotkey="r" onPress={() => void refresh($)}>Làm mới</Button>
           {behindCount > 0 && <Button key="pull-all" hotkey="p" label={`Pull tất cả (${behindCount})`} onPress={() => void pullAll($)} />}
         </Box>
         {notices}
@@ -3144,6 +3499,7 @@ export const register: Register = (on, options) => {
                   {ahead > 0 && <Text color="suggestion">↑{ahead}</Text>}
                 </Box>
                 {r.fetchError && <Text color="error" wrap="truncate-end">  fetch: {r.fetchError}</Text>}
+                {repoNotices(r)}
                 {r.error && <Text color="error">  {r.error}</Text>}
               </Box>
             )

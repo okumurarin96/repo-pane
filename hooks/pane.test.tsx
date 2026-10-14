@@ -9,6 +9,7 @@ const REPO: RepoStatus = {
   remote: 'bitbucket.org/acme/my-app',
   fetchError: null,
   error: null,
+  isMissing: false,
   worktrees: [
     {
       path: '/r', label: 'main', branch: 'master', isDetached: false, upstream: 'origin/master',
@@ -287,4 +288,51 @@ test('Claude can call the plugin tools: accounts lists no secrets, a bad path is
   const bad = await $.tool.call({ tool: 'mcp__repo-pane__push', path: 'relative/path' })
   expect(bad.isError).toBe(true)
   expect(bad.text).toContain('absolute path')
+})
+
+test('an account missing its token offers to sign in again', async ($, on) => {
+  seed(on, { view: 'accounts', accounts: [{ ...ACCOUNT, method: 'token', gitUser: 'alice', error: 'Không thấy token trong Keychain — đăng nhập lại' }], accountForm: FORM })
+  for (const surface of SURFACES) {
+    const ui = await $.ui.mount({ ...PANE, surface })
+    expect(await ui.find({ key: 'relogin:bitbucket:bitbucket.org:alice' })).toBeDefined()
+    expect(await ui.find({ type: 'Text', text: /Không thấy token/ })).toBeDefined()
+    await ui.unmount()
+  }
+})
+
+test('every view has the refresh button in the top bar', async ($, on) => {
+  const state: Record<string, unknown> = {
+    repos: [REPO], panel: PANEL, settings: SETTINGS, accounts: [ACCOUNT], remote: REMOTE, accountForm: FORM, refreshedAt: 1,
+    selected: { repo: '/r', worktree: '/r', tab: 'changes' } as Selection,
+  }
+  seed(on, state)
+  for (const surface of SURFACES) {
+    for (const v of ['repos', 'repo', 'remote', 'accounts']) {
+      state.view = v
+      const ui = await $.ui.mount({ ...PANE, surface })
+      expect({ surface, v, found: Boolean(await ui.find({ key: 'refresh-view' })) }).toEqual({ surface, v, found: true })
+      await ui.unmount()
+    }
+  }
+})
+
+test('a moved remote, a dead remote and a missing folder each offer their fix', async ($, on) => {
+  const gone: RepoStatus = { ...REPO, path: '/g', name: 'gone', fetchError: 'không có quyền truy cập repo' }
+  const missing: RepoStatus = { ...REPO, path: '/m', name: 'missing', worktrees: [], isMissing: true, error: 'Không thấy thư mục này nữa' }
+  seed(on, {
+    view: 'repos', repos: [REPO, gone, missing],
+    moves: { '/r': { remote: 'origin', from: 'https://alice@bitbucket.org/acme/my-app.git', to: 'https://alice@bitbucket.org/acme/new-app.git' } },
+    replacements: { '/g': [remoteRepo('gone')] },
+    relocations: { '/m': ['/home/me/code/missing'] },
+  })
+  for (const surface of SURFACES) {
+    const ui = await $.ui.mount({ ...PANE, surface })
+    expect(await ui.find({ key: 'mv-apply:/r' })).toBeDefined()
+    expect(await ui.find({ key: 'rep-find:/g' })).toBeDefined()
+    expect(await ui.find({ key: 'rep-use:/g:bitbucket.org/acme/gone' })).toBeDefined()
+    expect(await ui.find({ key: 'reloc:/m' })).toBeDefined()
+    expect(await ui.find({ key: 'reloc-use:/m:/home/me/code/missing' })).toBeDefined()
+    expect(await ui.find({ key: 'reloc-drop:/m' })).toBeDefined()
+    await ui.unmount()
+  }
 })

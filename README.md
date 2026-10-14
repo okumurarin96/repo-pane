@@ -13,6 +13,11 @@ Một plugin cho Claude Code (terminal và app desktop) để làm việc với 
   - **Stash**, **Tag**, **Pull request** (xem, tạo), **Nâng cao** (pull merge/rebase, force push with lease, reset, clean, worktree, submodule), **Cài đặt** (remote, user.name / user.email)
   - **Publish lên remote**: repo chưa có remote thì tạo repo mới trên GitHub / Bitbucket / GitLab (public hoặc private), gắn `origin` rồi push
 - **Repo trên remote**: liệt kê repo của mọi tài khoản đã đăng nhập, tìm kiếm, clone.
+- **Khi có gì thay đổi**:
+  - Repo trên remote đổi tên hoặc chuyển owner: plugin nhận ra từ thông báo của nhà cung cấp và có nút **Cập nhật URL**.
+  - Link remote không còn: **Tìm link mới** trong các tài khoản, hoặc sửa URL tay; nút **Kiểm tra link remote** trong tab Cài đặt.
+  - Thư mục repo bị đổi tên, di chuyển hoặc xoá: **Chỉ lại thư mục**, **Tìm thư mục** (theo remote) hoặc **Bỏ theo dõi**.
+- **⟳ Làm mới** trên thanh trên cùng (phím `r`): đọc lại đúng thứ đang xem (repo, danh sách trên remote, hoặc kiểm tra lại mọi tài khoản).
 - **Tài khoản**: Bitbucket, GitHub, GitLab (cả GitHub Enterprise / GitLab tự host), ba kiểu đăng nhập:
   - OAuth qua trình duyệt (cần một OAuth app, xem bên dưới)
   - API token / personal access token: đọc từ clipboard, không gõ vào pane và không hiện ra
@@ -20,7 +25,7 @@ Một plugin cho Claude Code (terminal và app desktop) để làm việc với 
   - Chọn giao thức HTTPS hoặc SSH cho từng tài khoản. Remote của repo và `~/.ssh/config` không bị sửa.
 - **Tool cho Claude**: `status`, `accounts`, `publish`, `push`, `pull`, `fetch`, `create_pull_request` (tên đầy đủ `mcp__repo-pane__<tool>`). Bạn nhờ Claude "tạo repo rồi push" hay "mở pull request", Claude làm bằng tài khoản đã đăng nhập trong plugin.
 
-Token và secret lưu trong macOS Keychain qua `git credential`. Plugin không ghi chúng ra file nào.
+Token và secret lưu trong macOS Keychain qua `git credential`. Plugin không ghi chúng ra file nào. Khi plugin chạy git, git chỉ được đọc token, không xoá được nó kể cả khi nhà cung cấp từ chối; tài khoản thiếu hoặc bị từ chối token hiện rõ kèm nút **Đăng nhập lại**.
 
 ## Cài đặt
 

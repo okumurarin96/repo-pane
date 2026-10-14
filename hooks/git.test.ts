@@ -1,7 +1,7 @@
 import { expect, test } from 'claude-code/testing'
 
 import {
-  cloneFolder, credentialRewriteArgs, diffHunks, parseKeyFingerprint, remoteHosts, sshArgv, sshCommand, sshGreeting, isAuthError, isClean, isValidRemoteUrl, parseBranches, parseLog, parseRemoteBranches,
+  READ_ONLY_CREDENTIALS, isRemoteGone, parseMovedNotice, rewriteRemoteUrl, cloneFolder, credentialRewriteArgs, diffHunks, parseKeyFingerprint, remoteHosts, sshArgv, sshCommand, sshGreeting, isAuthError, isClean, isValidRemoteUrl, parseBranches, parseLog, parseRemoteBranches,
   parseRemotes, parseRemoteUrl, parseStashes, parseStatus, parseTags, parseWorktreeList, remoteKey, sshRewriteArgs,
   worktreeFolder, worktreeLabel,
 } from './git'
@@ -128,4 +128,25 @@ test('diff output keeps only the hunks', async () => {
   const out = ['diff --git a/x b/x', 'index 1..2 100644', '--- a/x', '+++ b/x', '@@ -1 +1 @@', '-a', '+b', ''].join('\n')
   expect(diffHunks(out)).toBe('@@ -1 +1 @@\n-a\n+b')
   expect(diffHunks('Binary files differ')).toBe('')
+})
+
+test('network git commands only read saved credentials', async () => {
+  // the configured helpers are reset first, then one helper that answers get only
+  expect(READ_ONLY_CREDENTIALS.slice(0, 2)).toEqual(['-c', 'credential.helper='])
+  expect(READ_ONLY_CREDENTIALS[3]).toContain('test "$1" = get || exit 0')
+  expect(READ_ONLY_CREDENTIALS[3]).toContain('env -u GIT_CONFIG_PARAMETERS git credential fill')
+})
+
+test('a moved remote: the notice, and the new URL in the old one\'s style', async () => {
+  const gh = 'remote: This repository moved. Please use the new location:\nremote:   https://github.com/acme/new-name.git\nFrom https://github.com/acme/old\n'
+  expect(parseMovedNotice(gh)).toBe('https://github.com/acme/new-name.git')
+  expect(parseMovedNotice('warning: redirecting to https://gitlab.com/team/app.git/\n')).toBe('https://gitlab.com/team/app.git')
+  expect(parseMovedNotice('warning: redirecting to https://host/a/b.git/info/refs?service=git-upload-pack')).toBe('https://host/a/b.git')
+  expect(parseMovedNotice('From github.com:acme/app\n * branch main')).toBe(null)
+  expect(rewriteRemoteUrl('git@github.com:acme/old.git', 'https://github.com/acme/new-name.git')).toBe('git@github.com:acme/new-name.git')
+  expect(rewriteRemoteUrl('https://alice@bitbucket.org/acme/old.git', 'https://bitbucket.org/other/app')).toBe('https://alice@bitbucket.org/other/app.git')
+  expect(rewriteRemoteUrl('https://github.com/acme/old', 'https://github.com/acme/new.git')).toBe('https://github.com/acme/new.git')
+  expect(isRemoteGone('remote: Repository not found.')).toBe(true)
+  expect(isRemoteGone('không có quyền truy cập repo')).toBe(true)
+  expect(isRemoteGone('Could not resolve host: github.com')).toBe(false)
 })
