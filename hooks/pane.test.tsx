@@ -80,9 +80,9 @@ const REMOTE: RemoteList = {
 }
 
 const PANE = {
-  plugin: 'git-client',
+  plugin: 'repo-pane',
   component: 'Pane',
-  requestId: 'git-client',
+  requestId: 'repo-pane',
   props: { title: 'Git', isFocused: true, bodyColumns: 100, placement: 'dock', scroll: { offset: 0, bodyRows: 40 }, view: {} },
 } as const
 
@@ -90,7 +90,7 @@ const SURFACES = ['terminal', 'desktop'] as const
 
 function seed(on: Parameters<TestBody>[1], state: Record<string, unknown>) {
   on('state.get', async (_$, e, next) => {
-    if (e.plugin !== 'git-client' || !(e.key in state)) return next(e)
+    if (e.plugin !== 'repo-pane' || !(e.key in state)) return next(e)
     return { value: { value: state[e.key], version: 1 } }
   })
 }
@@ -104,7 +104,7 @@ test('repo list and the band', async ($, on) => {
     expect(await ui.find({ key: 'tab-accounts' })).toBeDefined()
     await ui.unmount()
     const band = await $.ui.mount({
-      plugin: 'git-client', surface, component: 'AbovePrompt',
+      plugin: 'repo-pane', surface, component: 'AbovePrompt',
       props: { hasSurvey: false, isWorking: false, maxRows: 10, bodyColumns: 120, scroll: { offset: 0, bodyRows: 10 }, view: {} },
     })
     expect(await band.find({ type: 'Text', text: /1 cần pull/ })).toBeDefined()
@@ -251,4 +251,40 @@ test('git-flow tab offers setup in a repo without it, and an empty repo list off
     expect(await list.find({ key: 'watch-found:/home/me/a' })).toBeDefined()
     await list.unmount()
   }
+})
+
+test('a repo without origin offers Publish, with the signed-in accounts', async ($, on) => {
+  const noRemote: RepoStatus = { ...REPO, remote: null }
+  const state: Record<string, unknown> = {
+    repos: [noRemote], view: 'repo', panel: PANEL, accounts: [ACCOUNT], owners: { [ACCOUNT.id]: ['acme', 'other'] },
+    settings: { '/r': { remotes: [], localName: '', localEmail: '', name: 'Alice', email: 'alice@example.com' } },
+    selected: { repo: '/r', worktree: '/r', tab: 'settings' } as Selection,
+  }
+  seed(on, state)
+  for (const surface of SURFACES) {
+    const ui = await $.ui.mount({ ...PANE, surface })
+    expect(await ui.find({ key: 'pub-account' })).toBeDefined()
+    expect(await ui.find({ key: 'pub-owner' })).toBeDefined()
+    expect(await ui.find({ key: 'in:pub:name:/r' })).toBeDefined()
+    expect(await ui.find({ key: 'flag:pub:public:/r' })).toBeDefined()
+    expect(await ui.find({ key: 'pub-go' })).toBeDefined()
+    expect(await ui.find({ key: 'pub-shortcut' })).toBeDefined()
+    await ui.unmount()
+  }
+  // with an origin, no Publish
+  state.settings = SETTINGS
+  state.repos = [REPO]
+  const withOrigin = await $.ui.mount({ ...PANE, surface: 'desktop' })
+  expect(await withOrigin.find({ key: 'pub-go' })).toBeUndefined()
+  await withOrigin.unmount()
+})
+
+test('Claude can call the plugin tools: accounts lists no secrets, a bad path is refused', async ($, on) => {
+  seed(on, { accounts: [ACCOUNT] })
+  const accounts = await $.tool.call({ tool: 'mcp__repo-pane__accounts' })
+  expect(accounts.text).toContain('bitbucket alice@bitbucket.org (oauth, git over https)')
+  expect(JSON.stringify(accounts.result)).not.toContain('gitUser')
+  const bad = await $.tool.call({ tool: 'mcp__repo-pane__push', path: 'relative/path' })
+  expect(bad.isError).toBe(true)
+  expect(bad.text).toContain('absolute path')
 })

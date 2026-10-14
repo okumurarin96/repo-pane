@@ -237,7 +237,7 @@ export type DiffView = { title: string; source: string; format: 'diff' | 'source
 
 declare module 'claude-code' {
   interface PluginState {
-    'git-client': {
+    'repo-pane': {
       repos: RepoStatus[]
       fetch: FetchInfo
       refreshedAt: number | null
@@ -258,6 +258,8 @@ declare module 'claude-code' {
       oauth: OAuthProgress | null
       scan: ScanResult
       ssh: SshState
+      /** Where each account can create repos (orgs, workspaces, groups), by account id. */
+      owners: Record<string, string[]>
     }
   }
 }

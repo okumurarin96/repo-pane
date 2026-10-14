@@ -1,9 +1,12 @@
 {
-  "name": "git-client",
-  "version": "0.4.0",
-  "author": { "name": "okumurarin96" },
-  "repository": "https://github.com/okumurarin96/claude-git-client",
-  "description": "Git client pane: every repo and worktree at a glance, changes, commit, branches, drawn history graph, git-flow, stash, tags, pull requests, remote repo browser with clone, and OAuth or token sign-in for Bitbucket, GitHub and GitLab",
+  "name": "repo-pane",
+  "version": "0.5.0",
+  "author": {
+    "name": "okumurarin96"
+  },
+  "repository": "https://github.com/okumurarin96/repo-pane",
+  "license": "Apache-2.0",
+  "description": "Repo Pane for Git: a pane inside Claude Code for every repo and worktree — changes, commit, branches, drawn history graph, git-flow, stash, tags, pull requests, publish and clone, with OAuth, token or SSH sign-in for Bitbucket, GitHub and GitLab",
   "types": "./types/index.d.ts",
   "userConfig": {
     "repos": {

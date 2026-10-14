@@ -2,7 +2,7 @@ import { expect, test } from 'claude-code/testing'
 
 import type { Account } from '../types'
 import {
-  OAUTH_REDIRECT, authHeaders, authorizeUrl, deviceCodeRequest, deviceTokenRequest, httpsWithUser, linkNext, loginOf,
+  OAUTH_REDIRECT, authHeaders, authorizeUrl, createRepoRequest, ownersUrl, parseCreatedRepo, parseOwners, repoSlug, deviceCodeRequest, deviceTokenRequest, httpsWithUser, linkNext, loginOf,
   oauthAppPage, oauthGitUser, parseDeviceCode, parseWorkspacePage, parsePrs, parseRepoPage, parseTokenResponse, pkceChallenge, prCreateRequest, prListUrl,
   providerForHost, repoListUrls, tokenRequest, verifyUrl,
 } from './providers'
@@ -111,4 +111,25 @@ test('pull requests: list URL, parse and create body per provider', async () => 
   expect(JSON.parse(req.body)).toEqual({ title: 'T', description: '', source: { branch: { name: 'f' } }, destination: { branch: { name: 'release' } } })
   expect(JSON.parse(prCreateRequest(GH, 'o/r', { title: 'T', source: 'f', target: 'main', description: 'd' }).body)).toEqual({ title: 'T', head: 'f', base: 'main', body: 'd' })
   expect(httpsWithUser('https://bitbucket.org/acme/r.git', 'alice')).toBe('https://alice@bitbucket.org/acme/r.git')
+})
+
+test('publish: create-repo requests and responses for the three providers', async () => {
+  const repo = { name: 'My Tool!', description: 'd', isPrivate: true }
+  expect(repoSlug('My Tool!')).toBe('My-Tool')
+  expect(createRepoRequest(GH, 'octo', repo)).toEqual({
+    url: 'https://api.github.com/user/repos',
+    body: JSON.stringify({ name: 'My-Tool', description: 'd', private: true, auto_init: false }),
+  })
+  expect(createRepoRequest(GH, 'acme-org', repo).url).toBe('https://api.github.com/orgs/acme-org/repos')
+  expect(createRepoRequest(BB, 'acme', repo).url).toBe('https://api.bitbucket.org/2.0/repositories/acme/my-tool')
+  expect(JSON.parse(createRepoRequest(BB, 'acme', repo).body)).toEqual({ scm: 'git', is_private: true, description: 'd' })
+  expect(JSON.parse(createRepoRequest(GL, 'me', { ...repo, isPrivate: false }, 42).body)).toMatchObject({ path: 'My-Tool', visibility: 'public', namespace_id: 42 })
+
+  expect(parseCreatedRepo('github', JSON.stringify({ html_url: 'https://github.com/o/r', clone_url: 'https://github.com/o/r.git', ssh_url: 'git@github.com:o/r.git' })))
+    .toEqual({ webUrl: 'https://github.com/o/r', httpsUrl: 'https://github.com/o/r.git', sshUrl: 'git@github.com:o/r.git' })
+  expect(parseCreatedRepo('bitbucket', JSON.stringify({ links: { html: { href: 'https://bitbucket.org/acme/r' }, clone: [{ name: 'https', href: 'https://alice@bitbucket.org/acme/r.git' }, { name: 'ssh', href: 'git@bitbucket.org:acme/r.git' }] } })))
+    .toEqual({ webUrl: 'https://bitbucket.org/acme/r', httpsUrl: 'https://bitbucket.org/acme/r.git', sshUrl: 'git@bitbucket.org:acme/r.git' })
+  expect(parseOwners('github', JSON.stringify([{ login: 'acme-org' }]))).toEqual(['acme-org'])
+  expect(parseOwners('gitlab', JSON.stringify([{ full_path: 'team/web' }]))).toEqual(['team/web'])
+  expect(ownersUrl(GL)).toBe('https://gitlab.example.com/api/v4/groups?min_access_level=30&per_page=100')
 })

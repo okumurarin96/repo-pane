@@ -1,11 +1,18 @@
 {
-  "name": "claude-git-client",
-  "owner": { "name": "okumurarin96" },
+  "name": "repo-pane",
+  "description": "Repo Pane for Git — a Claude Code plugin",
+  "owner": {
+    "name": "okumurarin96",
+    "url": "https://github.com/okumurarin96"
+  },
   "plugins": [
     {
-      "name": "git-client",
+      "name": "repo-pane",
       "source": "./",
-      "description": "A git client pane inside Claude Code: repos and worktrees, changes, commit, branches, history graph, git-flow, stash, tags, pull requests, clone, and sign-in for Bitbucket, GitHub and GitLab"
+      "description": "Repo Pane for Git: a pane inside Claude Code for every repo and worktree — changes, commit, branches, drawn history graph, git-flow, stash, tags, pull requests, publish and clone, with OAuth, token or SSH sign-in for Bitbucket, GitHub and GitLab",
+      "category": "development",
+      "license": "Apache-2.0",
+      "homepage": "https://github.com/okumurarin96/repo-pane"
     }
   ]
 }

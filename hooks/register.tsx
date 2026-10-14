@@ -17,42 +17,44 @@ import {
 } from './git'
 import { GRAPH_FORMAT, graphSvg, parseGraphLog } from './graph'
 import {
-  BITBUCKET_WORKSPACES_URL, OAUTH_REDIRECT, PROVIDERS, apiError, parseWorkspacePage, authHeaders, authorizeUrl, defaultHost, deviceCodeRequest, deviceTokenRequest,
+  BITBUCKET_WORKSPACES_URL, OAUTH_REDIRECT, PROVIDERS, apiError, createRepoRequest, ownersUrl, parseCreatedRepo,
+  parseOwners, parseWorkspacePage, repoSlug, authHeaders, authorizeUrl, defaultHost, deviceCodeRequest, deviceTokenRequest,
   httpsWithUser, loginOf, matchesQuery, oauthAppHint, oauthAppPage, oauthGitUser, parseCreatedPr, parseDeviceCode,
   parsePrs, parseRepoPage, parseTokenResponse, pkceChallenge, prCreateRequest, prListUrl, providerForHost,
   providerLabel, randomToken, repoListUrls, sshKeysPage, tokenHint, tokenPageUrl, tokenRequest, userUrl, verifyUrl,
 } from './providers'
 import type { TokenSet } from './providers'
 
-const PANE = 'git-client'
-const TITLE = 'Git'
+const PANE = 'repo-pane'
+const TITLE = 'Repo Pane'
 const MAX_REMOTE_ROWS = 80
 const MAX_LIST = 120
 // an SVG may carry at most 131072 characters: about 100 graph rows
 const GRAPH_ROWS = 90
 
-const repos = atom({ plugin: 'git-client', key: 'repos' } as const, [] as RepoStatus[])
-const fetchInfo = atom({ plugin: 'git-client', key: 'fetch' } as const, { at: null, isRunning: false, failed: 0 } as FetchInfo)
-const refreshedAt = atom({ plugin: 'git-client', key: 'refreshedAt' } as const, null as number | null)
-const view = atom({ plugin: 'git-client', key: 'view' } as const, 'repos' as View)
-const selected = atom({ plugin: 'git-client', key: 'selected' } as const, null as Selection | null)
-const panel = atom({ plugin: 'git-client', key: 'panel' } as const, null as Panel | null)
-const settings = atom({ plugin: 'git-client', key: 'settings' } as const, {} as Record<string, RepoSettings>)
-const busy = atom({ plugin: 'git-client', key: 'busy' } as const, {} as Record<string, string>)
-const drafts = atom({ plugin: 'git-client', key: 'drafts' } as const, {} as Record<string, string>)
-const flags = atom({ plugin: 'git-client', key: 'flags' } as const, {} as Record<string, boolean>)
-const confirm = atom({ plugin: 'git-client', key: 'confirm' } as const, null as Confirm | null)
-const result = atom({ plugin: 'git-client', key: 'result' } as const, null as Result | null)
-const diff = atom({ plugin: 'git-client', key: 'diff' } as const, null as DiffView | null)
-const remote = atom({ plugin: 'git-client', key: 'remote' } as const, { isLoading: false, at: null, errors: [], repos: [], onDisk: [] } as RemoteList)
-const accounts = atom({ plugin: 'git-client', key: 'accounts' } as const, [] as Account[])
-const accountForm = atom({ plugin: 'git-client', key: 'accountForm' } as const, {
+const repos = atom({ plugin: 'repo-pane', key: 'repos' } as const, [] as RepoStatus[])
+const fetchInfo = atom({ plugin: 'repo-pane', key: 'fetch' } as const, { at: null, isRunning: false, failed: 0 } as FetchInfo)
+const refreshedAt = atom({ plugin: 'repo-pane', key: 'refreshedAt' } as const, null as number | null)
+const view = atom({ plugin: 'repo-pane', key: 'view' } as const, 'repos' as View)
+const selected = atom({ plugin: 'repo-pane', key: 'selected' } as const, null as Selection | null)
+const panel = atom({ plugin: 'repo-pane', key: 'panel' } as const, null as Panel | null)
+const settings = atom({ plugin: 'repo-pane', key: 'settings' } as const, {} as Record<string, RepoSettings>)
+const busy = atom({ plugin: 'repo-pane', key: 'busy' } as const, {} as Record<string, string>)
+const drafts = atom({ plugin: 'repo-pane', key: 'drafts' } as const, {} as Record<string, string>)
+const flags = atom({ plugin: 'repo-pane', key: 'flags' } as const, {} as Record<string, boolean>)
+const confirm = atom({ plugin: 'repo-pane', key: 'confirm' } as const, null as Confirm | null)
+const result = atom({ plugin: 'repo-pane', key: 'result' } as const, null as Result | null)
+const diff = atom({ plugin: 'repo-pane', key: 'diff' } as const, null as DiffView | null)
+const remote = atom({ plugin: 'repo-pane', key: 'remote' } as const, { isLoading: false, at: null, errors: [], repos: [], onDisk: [] } as RemoteList)
+const accounts = atom({ plugin: 'repo-pane', key: 'accounts' } as const, [] as Account[])
+const accountForm = atom({ plugin: 'repo-pane', key: 'accountForm' } as const, {
   provider: 'bitbucket', host: 'bitbucket.org', method: 'oauth', protocol: 'https', sshKey: '', username: '', email: '', scopes: '',
 } as AccountForm)
-const ssh = atom({ plugin: 'git-client', key: 'ssh' } as const, { keys: [], test: null, isTesting: false } as SshState)
-const oauthApps = atom({ plugin: 'git-client', key: 'oauthApps' } as const, [] as OAuthApp[])
-const oauth = atom({ plugin: 'git-client', key: 'oauth' } as const, null as OAuthProgress | null)
-const scan = atom({ plugin: 'git-client', key: 'scan' } as const, { isLoading: false, root: '', found: [] } as ScanResult)
+const ssh = atom({ plugin: 'repo-pane', key: 'ssh' } as const, { keys: [], test: null, isTesting: false } as SshState)
+const oauthApps = atom({ plugin: 'repo-pane', key: 'oauthApps' } as const, [] as OAuthApp[])
+const oauth = atom({ plugin: 'repo-pane', key: 'oauth' } as const, null as OAuthProgress | null)
+const scan = atom({ plugin: 'repo-pane', key: 'scan' } as const, { isLoading: false, root: '', found: [] } as ScanResult)
+const owners = atom({ plugin: 'repo-pane', key: 'owners' } as const, {} as Record<string, string[]>)
 
 // No prompts from git: a command that needs credentials fails instead of hanging.
 const GIT_ENV = {
@@ -459,6 +461,7 @@ async function confirmed($: EngineInterface) {
     case 'unwatch': return unwatch($, a)
     case 'flow-finish': return flowFinish($, a, b)
     case 'oauth-app-remove': return removeOAuthApp($, a as Provider, b)
+    case 'publish': return publishFromDrafts($, a)
     default: return undefined
   }
 }
@@ -816,11 +819,11 @@ async function dropSecret($: EngineInterface, host: string, user: string) {
 
 // Refresh tokens and app secrets are kept under hosts of their own, so git never sends them anywhere.
 function refreshHost(host: string): string {
-  return `refresh-token.${host}.git-client.invalid`
+  return `refresh-token.${host}.repo-pane.invalid`
 }
 
 function appSecretHost(host: string): string {
-  return `oauth-app.${host}.git-client.invalid`
+  return `oauth-app.${host}.repo-pane.invalid`
 }
 
 /** The account's token (an OAuth one refreshed first when it is about to run out), or null. */
@@ -1328,7 +1331,7 @@ async function generateSshKey($: EngineInterface) {
     return
   }
   await $.process.run(['mkdir', '-p', '-m', '700', `${cfg.home}/.ssh`]).catch(() => undefined)
-  const r = await $.process.run(['ssh-keygen', '-q', '-t', 'ed25519', '-N', '', '-C', `${who}@${host} (git-client)`, '-f', path])
+  const r = await $.process.run(['ssh-keygen', '-q', '-t', 'ed25519', '-N', '', '-C', `${who}@${host} (repo-pane)`, '-f', path])
     .catch(err => ({ exitCode: 1, stdout: '', stderr: String(err) }))
   if (r.exitCode !== 0) {
     void $.ui.toast(`Tạo key lỗi: ${lastLine(r.stderr)}`)
@@ -1522,7 +1525,12 @@ async function clone($: EngineInterface, repo: RemoteRepo) {
 async function prTarget($: EngineInterface): Promise<{ account: Account; path: string } | string> {
   const sel = await read($, selected)
   if (!sel) return 'Chưa chọn repo'
-  const s = (await read($, settings))[sel.repo]
+  return prTargetFor($, sel.repo)
+}
+
+/** The signed-in account and API path for a repo's origin, or why there is none. */
+async function prTargetFor($: EngineInterface, repoPath: string): Promise<{ account: Account; path: string } | string> {
+  const s = (await read($, settings))[repoPath] ?? (await readSettings($, repoPath))
   const origin = s?.remotes.find(r => r.name === 'origin') ?? s?.remotes[0]
   const parsed = origin ? parseRemoteUrl(origin.fetchUrl) : null
   if (!parsed) return 'Repo không có remote nhận diện được'
@@ -1755,6 +1763,351 @@ async function watchAll($: EngineInterface, paths: readonly string[]) {
   await refresh($)
 }
 
+// ── publish: create the repo on the provider, add origin, push ─────────────
+
+/** Accounts that can create repos: every OAuth or token one (an SSH-only account has no API). */
+async function apiAccounts($: EngineInterface): Promise<Account[]> {
+  return (await read($, accounts)).filter(a => a.method !== 'ssh')
+}
+
+/** The account itself, then its orgs / workspaces / groups. */
+async function loadOwners($: EngineInterface, accountId: string): Promise<string[]> {
+  const a = (await read($, accounts)).find(x => x.id === accountId)
+  if (!a) return []
+  const token = await tokenOf($, a)
+  const own = a.provider === 'bitbucket' ? [] : [a.username]
+  let found: string[] = []
+  if (token) {
+    try {
+      const res = await $.http.fetch(ownersUrl(a), { headers: authHeaders(a, token) })
+      if (res.ok) found = parseOwners(a.provider, res.text)
+    } catch {
+      // the account's own space still works
+    }
+  }
+  const list = [...new Set([...own, ...a.scopes, ...found])]
+  await update($, owners, o => ({ ...o, [accountId]: list }))
+  return list
+}
+
+type PublishInput = { accountId?: string; provider?: string; owner?: string; name?: string; description?: string; isPrivate?: boolean; remote?: string }
+type PublishOutcome = { ok: boolean; text: string; webUrl: string }
+
+/**
+ * Creates the repo on the provider with a signed-in account, adds it as a remote of the local repo
+ * (https with the account's git user, or SSH when the account is set to SSH) and pushes the current branch.
+ */
+async function publishRepo($: EngineInterface, repoPath: string, input: PublishInput): Promise<PublishOutcome> {
+  const fail = (text: string): PublishOutcome => ({ ok: false, text, webUrl: '' })
+  const top = await git($, repoPath, ['rev-parse', '--show-toplevel'])
+  if (top.exitCode !== 0) return fail(`${repoPath} không phải git repo`)
+  const cwd = top.stdout.trim()
+  const remoteName = (input.remote ?? 'origin').trim() || 'origin'
+  if (!/^[\w.-]+$/.test(remoteName)) return fail(`Tên remote không hợp lệ: ${remoteName}`)
+  const existing = await git($, cwd, ['remote', 'get-url', remoteName])
+  if (existing.exitCode === 0) return fail(`Repo đã có remote "${remoteName}" (${existing.stdout.trim()}): đổi tên remote hoặc dùng Push`)
+  const head = await git($, cwd, ['rev-parse', '--verify', '-q', 'HEAD'])
+  if (head.exitCode !== 0) return fail('Repo chưa có commit nào để push')
+
+  const list = await apiAccounts($)
+  const account = input.accountId
+    ? list.find(a => a.id === input.accountId)
+    : list.find(a => !input.provider || a.provider === input.provider)
+  if (!account) return fail(input.provider ? `Chưa đăng nhập tài khoản ${input.provider} (OAuth hoặc token)` : 'Chưa có tài khoản OAuth hoặc token nào')
+  const token = await tokenOf($, account)
+  if (!token) return fail(`${account.username}@${account.host}: không thấy token trong Keychain, đăng nhập lại`)
+
+  const name = repoSlug(input.name || cwd.split('/').pop() || '')
+  if (!name) return fail('Tên repo không hợp lệ')
+  const owner = (input.owner ?? '').trim() || (account.provider === 'bitbucket' ? account.scopes[0] ?? '' : account.username)
+  if (!owner) return fail('Bitbucket cần workspace để tạo repo (chọn owner)')
+  const isPrivate = input.isPrivate !== false
+
+  let groupId: number | undefined
+  if (account.provider === 'gitlab' && owner.toLowerCase() !== account.username.toLowerCase()) {
+    try {
+      const g = await $.http.fetch(`https://${account.host}/api/v4/groups/${encodeURIComponent(owner)}`, { headers: authHeaders(account, token) })
+      if (!g.ok) return fail(`Không thấy group ${owner}: ${apiError(g.status, g.text)}`)
+      groupId = (JSON.parse(g.text) as { id?: number }).id
+    } catch (err) {
+      return fail(String(err))
+    }
+  }
+
+  const req = createRepoRequest(account, owner, { name, description: input.description ?? '', isPrivate }, groupId)
+  let created: { webUrl: string; httpsUrl: string; sshUrl: string }
+  try {
+    const res = await $.http.fetch(req.url, {
+      method: 'POST',
+      headers: { ...authHeaders(account, token), 'Content-Type': 'application/json' },
+      body: req.body,
+    })
+    if (!res.ok) {
+      const hint = res.status === 403 ? ' — token chưa có quyền tạo repo' : res.status === 422 || res.status === 400 ? ' — có thể tên đã tồn tại' : ''
+      return fail(`Tạo repo lỗi: ${apiError(res.status, res.text)}${hint}`)
+    }
+    created = parseCreatedRepo(account.provider, res.text)
+  } catch (err) {
+    return fail(`Tạo repo lỗi: ${String(err)}`)
+  }
+
+  const url = account.protocol === 'ssh' ? created.sshUrl : httpsWithUser(created.httpsUrl, account.gitUser)
+  const steps: string[] = [`✓ Tạo ${isPrivate ? 'private' : 'public'} repo ${owner}/${name} trên ${providerLabel(account.provider)}: ${created.webUrl}`]
+  const add = await git($, cwd, ['remote', 'add', remoteName, url])
+  if (add.exitCode !== 0) return { ok: false, text: [...steps, `✗ Thêm remote: ${lastLine(add.stderr)}`].join('\n'), webUrl: created.webUrl }
+  steps.push(`✓ Thêm remote ${remoteName} → ${url}`)
+  const pushed = await gitNet($, cwd, ['push', '-u', remoteName, 'HEAD'])
+  if (pushed.exitCode !== 0) {
+    steps.push(`✗ Push: ${explainNetworkError(lastLine(pushed.stderr))}`)
+    return { ok: false, text: steps.join('\n'), webUrl: created.webUrl }
+  }
+  steps.push(`✓ Push ${(await git($, cwd, ['rev-parse', '--abbrev-ref', 'HEAD'])).stdout.trim()} lên ${remoteName}`)
+  if (!allPaths().includes(cwd)) {
+    extraRepos = [...extraRepos, cwd]
+    await saveExtra($)
+  }
+  await refreshFor($, cwd)
+  return { ok: true, text: steps.join('\n'), webUrl: created.webUrl }
+}
+
+async function askPublish($: EngineInterface, repoPath: string) {
+  const d = await read($, drafts)
+  const f = await read($, flags)
+  const list = await apiAccounts($)
+  const account = list.find(a => a.id === d[`pub:account:${repoPath}`]) ?? list[0]
+  if (!account) {
+    void $.ui.toast('Đăng nhập một tài khoản OAuth hoặc token trước (tab Tài khoản)')
+    return
+  }
+  const name = repoSlug(d[`pub:name:${repoPath}`] || repoPath.split('/').pop() || '')
+  const owner = d[`pub:owner:${repoPath}`] || (account.provider === 'bitbucket' ? account.scopes[0] ?? '' : account.username)
+  const visibility = f[`pub:public:${repoPath}`] ? 'PUBLIC (ai cũng xem được)' : 'private'
+  await ask($, ['publish', repoPath].join(SEP), `Tạo ${owner}/${name} trên ${providerLabel(account.provider)} rồi push?`,
+    `Chế độ: ${visibility}\nTài khoản: ${account.username}@${account.host}\nRemote: origin`)
+}
+
+async function publishFromDrafts($: EngineInterface, repoPath: string) {
+  const d = await read($, drafts)
+  const f = await read($, flags)
+  const list = await apiAccounts($)
+  const account = list.find(a => a.id === d[`pub:account:${repoPath}`]) ?? list[0]
+  await setBusy($, repoPath, 'Publish')
+  try {
+    const out = await publishRepo($, repoPath, {
+      accountId: account?.id,
+      owner: d[`pub:owner:${repoPath}`],
+      name: d[`pub:name:${repoPath}`],
+      description: d[`pub:desc:${repoPath}`],
+      isPrivate: !f[`pub:public:${repoPath}`],
+    })
+    await update($, result, () => ({ label: 'Publish lên remote', ok: out.ok, text: out.text, at: Date.now() }))
+    void $.ui.toast(out.ok ? `Đã publish: ${out.webUrl}` : `Publish lỗi: ${lastLine(out.text)}`)
+  } finally {
+    await setBusy($, repoPath, null)
+  }
+}
+
+async function choosePublishAccount($: EngineInterface, repoPath: string, accountId: string) {
+  await setDraft($, `pub:account:${repoPath}`, accountId)
+  await setDraft($, `pub:owner:${repoPath}`, '')
+  await loadOwners($, accountId)
+}
+
+// ── tools Claude can call ──────────────────────────────────────────────────
+
+const TOOL_PREFIX = 'mcp__repo-pane__'
+
+type ToolAnswer = { result: unknown; text: string } | { isError: true; result: unknown; text: string }
+
+function toolOk(text: string, result: unknown = { ok: true }): ToolAnswer {
+  return { result, text }
+}
+
+function toolError(text: string): ToolAnswer {
+  return { isError: true, result: { ok: false, error: text }, text }
+}
+
+function str(v: unknown): string {
+  return typeof v === 'string' ? v.trim() : ''
+}
+
+/** The top of the git repo a tool was pointed at, or why it is not one. */
+async function toolRepo($: EngineInterface, path: unknown): Promise<string | ToolAnswer> {
+  const p = str(path)
+  if (!p.startsWith('/')) return toolError('`path` must be an absolute path to a git repository or worktree')
+  const top = await git($, p, ['rev-parse', '--show-toplevel'])
+  return top.exitCode === 0 ? top.stdout.trim() : toolError(`${p} is not a git repository`)
+}
+
+function describeWorktree(w: WorktreeStatus): string {
+  const sync = w.isDetached ? 'detached' : !w.upstream ? 'no upstream' : `↑${w.ahead} ↓${w.behind} vs ${w.upstream}`
+  const changes = isClean(w) ? 'clean' : `${w.staged} staged, ${w.modified} modified, ${w.untracked} untracked, ${w.conflicted} conflicted`
+  return `${w.path} [${w.branch}] ${sync}; ${changes}`
+}
+
+async function toolStatus($: EngineInterface, input: Record<string, unknown>): Promise<ToolAnswer> {
+  if (str(input.path)) {
+    const top = await toolRepo($, input.path)
+    if (typeof top !== 'string') return top
+    const r = await readRepo($, top, null)
+    const s = await readSettings($, top)
+    const remotes = s.remotes.map(x => `${x.name} ${x.fetchUrl}`).join('; ') || 'none'
+    const files = r.worktrees.flatMap(w => w.files.slice(0, 50).map(f => `  ${f.code} ${f.path}`))
+    return toolOk([`Repo ${top}`, `Remotes: ${remotes}`, ...r.worktrees.map(describeWorktree), ...files].join('\n'), r)
+  }
+  await refresh($)
+  const list = await read($, repos)
+  if (list.length === 0) return toolOk('No repositories are watched yet.', [])
+  return toolOk(list.map(r => [`${r.name} (${r.path})${r.fetchError ? ` — fetch error: ${r.fetchError}` : ''}`, ...r.worktrees.map(w => `  ${describeWorktree(w)}`)].join('\n')).join('\n'), list)
+}
+
+async function toolAccounts($: EngineInterface): Promise<ToolAnswer> {
+  const list = await read($, accounts)
+  if (list.length === 0) return toolOk('No accounts are signed in. The person can sign in from Repo Pane, tab "Tài khoản".', [])
+  const safe = list.map(a => ({ provider: a.provider, host: a.host, username: a.username, method: a.method, protocol: a.protocol, scopes: a.scopes, error: a.error }))
+  return toolOk(safe.map(a => `${a.provider} ${a.username}@${a.host} (${a.method}, git over ${a.protocol})${a.error ? ` — ${a.error}` : ''}`).join('\n'), safe)
+}
+
+async function toolPublish($: EngineInterface, input: Record<string, unknown>): Promise<ToolAnswer> {
+  const top = await toolRepo($, input.path)
+  if (typeof top !== 'string') return top
+  const out = await publishRepo($, top, {
+    provider: str(input.provider) || undefined,
+    owner: str(input.owner) || undefined,
+    name: str(input.name) || undefined,
+    description: str(input.description),
+    isPrivate: input.private !== false,
+    remote: str(input.remote) || undefined,
+  })
+  return out.ok ? toolOk(out.text, { ok: true, url: out.webUrl }) : toolError(out.text)
+}
+
+async function toolGit($: EngineInterface, cwd: string, label: string, args: string[]): Promise<ToolAnswer> {
+  const r = await gitNet($, cwd, args)
+  await refreshFor($, cwd)
+  const text = output(r)
+  return r.exitCode === 0 ? toolOk(`${label}: done${text ? `\n${text}` : ''}`) : toolError(`${label} failed: ${explainNetworkError(text || `exit ${r.exitCode}`)}`)
+}
+
+async function toolPush($: EngineInterface, input: Record<string, unknown>): Promise<ToolAnswer> {
+  const top = await toolRepo($, input.path)
+  if (typeof top !== 'string') return top
+  const upstream = await git($, top, ['rev-parse', '--abbrev-ref', '--symbolic-full-name', '@{upstream}'])
+  const args = upstream.exitCode === 0 ? ['push'] : ['push', '-u', 'origin', 'HEAD']
+  if (input.force_with_lease === true) args.push('--force-with-lease')
+  return toolGit($, top, 'Push', args)
+}
+
+async function toolPull($: EngineInterface, input: Record<string, unknown>): Promise<ToolAnswer> {
+  const top = await toolRepo($, input.path)
+  if (typeof top !== 'string') return top
+  const mode = str(input.mode)
+  const flag = mode === 'rebase' ? '--rebase' : mode === 'merge' ? '--no-rebase' : '--ff-only'
+  return toolGit($, top, `Pull (${flag})`, ['pull', flag])
+}
+
+async function toolFetch($: EngineInterface, input: Record<string, unknown>): Promise<ToolAnswer> {
+  if (!str(input.path)) {
+    await fetchAll($)
+    const failed = (await read($, repos)).filter(r => r.fetchError)
+    return toolOk(failed.length ? `Fetched every watched repo; errors:\n${failed.map(r => `${r.name}: ${r.fetchError}`).join('\n')}` : 'Fetched every watched repo.')
+  }
+  const top = await toolRepo($, input.path)
+  if (typeof top !== 'string') return top
+  return toolGit($, top, 'Fetch', ['fetch', '--all', '--prune'])
+}
+
+async function toolCreatePr($: EngineInterface, input: Record<string, unknown>): Promise<ToolAnswer> {
+  const top = await toolRepo($, input.path)
+  if (typeof top !== 'string') return top
+  const title = str(input.title)
+  const target = str(input.target)
+  if (!title || !target) return toolError('`title` and `target` (the branch to merge into) are required')
+  const source = str(input.source) || (await git($, top, ['rev-parse', '--abbrev-ref', 'HEAD'])).stdout.trim()
+  const t = await prTargetFor($, top)
+  if (typeof t === 'string') return toolError(t)
+  const token = await tokenOf($, t.account)
+  if (!token) return toolError('No token in the Keychain for this account: sign in again from Repo Pane')
+  const req = prCreateRequest(t.account, t.path, { title, source, target, description: str(input.description) })
+  try {
+    const res = await $.http.fetch(req.url, { method: 'POST', headers: { ...authHeaders(t.account, token), 'Content-Type': 'application/json' }, body: req.body })
+    if (!res.ok) return toolError(`Creating the pull request failed: ${apiError(res.status, res.text)}`)
+    const pr = parseCreatedPr(t.account.provider, res.text)
+    return toolOk(`Created pull request #${pr.id} ${pr.title} (${pr.source} → ${pr.target}): ${pr.url}`, pr)
+  } catch (err) {
+    return toolError(String(err))
+  }
+}
+
+const PATH_PROP = { type: 'string', description: 'Absolute path to the local git repository (or one of its worktrees)' }
+
+const TOOLS: { name: string; description: string; inputSchema: Record<string, unknown> }[] = [
+  {
+    name: 'status',
+    description: 'Git status from Repo Pane: with `path`, one repo (branch, ahead/behind, changed files, remotes); without it, every repo the person watches in Repo Pane.',
+    inputSchema: { type: 'object', properties: { path: PATH_PROP } },
+  },
+  {
+    name: 'accounts',
+    description: 'The Bitbucket / GitHub / GitLab accounts signed in to the repo-pane plugin (provider, host, username, sign-in method, git protocol). No secrets.',
+    inputSchema: { type: 'object', properties: {} },
+  },
+  {
+    name: 'publish',
+    description: 'Create a new repository on GitHub, Bitbucket or GitLab with a signed-in account, add it as the local repo\'s remote (origin by default) and push the current branch. Creates something visible to others: call it only when the person asked to publish or create the remote repo, and confirm the visibility with them first (private unless they said public).',
+    inputSchema: {
+      type: 'object',
+      properties: {
+        path: PATH_PROP,
+        provider: { type: 'string', enum: ['github', 'bitbucket', 'gitlab'], description: 'Which provider; default: the first signed-in account' },
+        owner: { type: 'string', description: 'GitHub user or org, Bitbucket workspace, or GitLab user or group path; default: the account itself (Bitbucket: its first workspace)' },
+        name: { type: 'string', description: 'Repository name; default: the local folder name' },
+        description: { type: 'string' },
+        private: { type: 'boolean', description: 'Default true' },
+        remote: { type: 'string', description: 'Remote name to add; default origin' },
+      },
+      required: ['path'],
+    },
+  },
+  {
+    name: 'push',
+    description: 'Push the current branch of a local repo with the signed-in account (sets the upstream to origin when there is none). `force_with_lease` only when the person asked to force push.',
+    inputSchema: { type: 'object', properties: { path: PATH_PROP, force_with_lease: { type: 'boolean' } }, required: ['path'] },
+  },
+  {
+    name: 'pull',
+    description: 'Pull the current branch of a local repo: fast-forward only by default; `mode` "rebase" or "merge" when the person asked for it.',
+    inputSchema: { type: 'object', properties: { path: PATH_PROP, mode: { type: 'string', enum: ['ff-only', 'rebase', 'merge'] } }, required: ['path'] },
+  },
+  {
+    name: 'fetch',
+    description: 'Fetch one repo (`path`), or every repo watched in Repo Pane when `path` is left out.',
+    inputSchema: { type: 'object', properties: { path: PATH_PROP } },
+  },
+  {
+    name: 'create_pull_request',
+    description: 'Open a pull request (merge request on GitLab) for a local repo\'s origin, from `source` (default: the current branch, which must be pushed) into `target`.',
+    inputSchema: {
+      type: 'object',
+      properties: { path: PATH_PROP, title: { type: 'string' }, target: { type: 'string' }, source: { type: 'string' }, description: { type: 'string' } },
+      required: ['path', 'title', 'target'],
+    },
+  },
+]
+
+async function runTool($: EngineInterface, name: string, input: Record<string, unknown>): Promise<ToolAnswer> {
+  switch (name) {
+    case 'status': return toolStatus($, input)
+    case 'accounts': return toolAccounts($)
+    case 'publish': return toolPublish($, input)
+    case 'push': return toolPush($, input)
+    case 'pull': return toolPull($, input)
+    case 'fetch': return toolFetch($, input)
+    case 'create_pull_request': return toolCreatePr($, input)
+    default: return toolError(`Unknown tool ${name}`)
+  }
+}
+
 const TABS: { tab: RepoTab; label: string }[] = [
   { tab: 'changes', label: 'Thay đổi' },
   { tab: 'branches', label: 'Branch' },
@@ -1797,7 +2150,8 @@ export const register: Register = (on, options) => {
   const refreshSeconds = Math.max(5, Number(options.refreshSeconds ?? 30))
 
   on('session.start', async ($, e, next) => {
-    await $.command.register({ name: 'git-repos', description: 'Mở pane Git (trạng thái repo, branch, commit, PR…)' })
+    await $.command.register({ name: 'repo-pane', description: 'Mở Repo Pane (trạng thái repo, branch, commit, PR…)' })
+    for (const t of TOOLS) await $.tool.register({ name: t.name, description: t.description, inputSchema: t.inputSchema })
     const home = await $.process.run(['printenv', 'HOME']).catch(() => ({ exitCode: 1, stdout: '', stderr: '' }))
     cfg.home = home.stdout.trim().replace(/\/+$/, '')
     if (!cfg.cloneDir) cfg.cloneDir = cfg.home
@@ -1819,11 +2173,18 @@ export const register: Register = (on, options) => {
     return next(e)
   })
 
-  on('command.run', { command: 'git-repos' }, async $ => {
+  // Tools Claude can call (registered at session.start): status, accounts, publish, push, pull, fetch, create_pull_request
+  on('tool.call', async ($, e, next) => {
+    if (!e.tool.startsWith(TOOL_PREFIX)) return next(e)
+    const { tool, tool_use_id: _id, ...input } = e as unknown as Record<string, unknown> & { tool: string; tool_use_id: string }
+    return runTool($, tool.slice(TOOL_PREFIX.length), input)
+  })
+
+  on('command.run', { command: 'repo-pane' }, async $ => {
     await $.ui.open({ id: PANE, title: TITLE, focus: true })
     void refresh($)
 
-    return { text: 'Đã mở pane Git.' }
+    return { text: 'Đã mở Repo Pane.' }
   })
 
   // One line above the prompt: what needs attention, and a button that opens the pane.
@@ -1840,7 +2201,7 @@ export const register: Register = (on, options) => {
 
     return (
       <Box flexDirection="row" gap={1} alignItems="center">
-        <Text bold>Git</Text>
+        <Text bold>Repo Pane</Text>
         <Text dimColor>{list.length} repo</Text>
         {behind > 0 && <Text color="warning">↓ {behind} cần pull</Text>}
         {dirty > 0 && <Text color="warning">◐ {dirty} có thay đổi</Text>}
@@ -1880,6 +2241,7 @@ export const register: Register = (on, options) => {
     const progress = await read($, oauth)
     const scanned = await read($, scan)
     const sshState = await read($, ssh)
+    const ownerLists = await read($, owners)
     const Svg = e.surface !== 'terminal' && 'Svg' in ui ? ui.Svg : null
     const now = Date.now()
 
@@ -2253,6 +2615,12 @@ export const register: Register = (on, options) => {
             <Button key="act-sourcetree" label="SourceTree" plain onPress={() => void openIn($, cwd, 'sourcetree')} />
           </Box>
           {repo.fetchError && <Text color="error">fetch: {repo.fetchError}</Text>}
+          {!repo.remote && s && !s.remotes.some(r => r.name === 'origin') && (
+            <Box flexDirection="row" gap={1} alignItems="center">
+              <Text color="warning">Repo chưa có remote.</Text>
+              <Button key="pub-shortcut" label="Publish lên remote" onPress={() => void setTab($, 'settings')} />
+            </Box>
+          )}
         </Box>
       )
 
@@ -2636,8 +3004,52 @@ export const register: Register = (on, options) => {
           </Box>
         )
       } else if (sel.tab === 'settings') {
+        const pubAccounts = accts.filter(a => a.method !== 'ssh')
+        const pubAccount = pubAccounts.find(a => a.id === d[`pub:account:${repo.path}`]) ?? pubAccounts[0]
+        const pubOwners = pubAccount ? ownerLists[pubAccount.id] ?? [] : []
+        const hasOrigin = Boolean(s?.remotes.some(r => r.name === 'origin'))
+        const publishBox = s && !hasOrigin && (
+          <Box flexDirection="column" gap={1} borderStyle="round" borderColor="suggestion" paddingX={1}>
+            <Text bold>Publish lên remote</Text>
+            <Text dimColor>Repo chưa có remote origin: tạo repo mới trên GitHub / Bitbucket / GitLab bằng tài khoản đã đăng nhập, gắn làm origin rồi push branch hiện tại.</Text>
+            {pubAccounts.length === 0 && (
+              <Box flexDirection="row" gap={1} alignItems="center">
+                <Text color="warning">Cần một tài khoản OAuth hoặc token.</Text>
+                <Button key="pub-goto-accounts" label="Mở tab Tài khoản" plain onPress={() => void showView($, 'accounts')} />
+              </Box>
+            )}
+            {pubAccount && Select && Input && (
+              <Box flexDirection="column" gap={1}>
+                <Select
+                  key="pub-account"
+                  label="Tài khoản"
+                  value={pubAccount.id}
+                  options={pubAccounts.map(a => ({ value: a.id, label: `${providerLabel(a.provider)} · ${a.username}@${a.host}` }))}
+                  onSelect={v => void choosePublishAccount($, repo.path, v)}
+                />
+                <Box flexDirection="row" gap={1} alignItems="center">
+                  <Select
+                    key="pub-owner"
+                    label={pubAccount.provider === 'bitbucket' ? 'Workspace' : pubAccount.provider === 'github' ? 'Owner (bạn hoặc organization)' : 'Namespace (bạn hoặc group)'}
+                    value={d[`pub:owner:${repo.path}`] || (pubAccount.provider === 'bitbucket' ? pubAccount.scopes[0] ?? '' : pubAccount.username)}
+                    options={(pubOwners.length ? pubOwners : [pubAccount.provider === 'bitbucket' ? pubAccount.scopes[0] ?? '' : pubAccount.username].filter(Boolean)).map(o => ({ value: o, label: o }))}
+                    onSelect={v => void setDraft($, `pub:owner:${repo.path}`, v)}
+                  />
+                  <Button key="pub-owners-load" label="Tải danh sách" plain onPress={() => void loadOwners($, pubAccount.id)} />
+                </Box>
+                {draftInput(`pub:name:${repo.path}`, 'Tên repo', repo.name)}
+                {draftInput(`pub:desc:${repo.path}`, 'Mô tả (tuỳ chọn)', '')}
+                <Box flexDirection="row" gap={1} flexWrap="wrap" alignItems="center">
+                  {flagButton(`pub:public:${repo.path}`, 'Public (bỏ chọn = private)')}
+                  <Button key="pub-go" variant="primary" label="Publish" onPress={() => void askPublish($, repo.path)} />
+                </Box>
+              </Box>
+            )}
+          </Box>
+        )
         body = !s ? <Text dimColor>Đang đọc cài đặt…</Text> : (
           <Box flexDirection="column" gap={1}>
+            {publishBox}
             {section('Remote', (
               <Box flexDirection="column">
                 {s.remotes.map(rm => (

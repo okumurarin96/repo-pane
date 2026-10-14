@@ -65,7 +65,7 @@ export function loginOf(p: Provider, text: string): string {
 export function tokenPageUrl(p: Provider, host: string): string {
   if (p === 'bitbucket') return 'https://id.atlassian.com/manage-profile/security/api-tokens'
   if (p === 'github') return `https://${host}/settings/personal-access-tokens/new`
-  return `https://${host}/-/user_settings/personal_access_tokens?name=git-client&scopes=api,read_repository,write_repository`
+  return `https://${host}/-/user_settings/personal_access_tokens?name=repo-pane&scopes=api,read_repository,write_repository`
 }
 
 export function tokenHint(p: Provider): string {
@@ -450,4 +450,73 @@ export function oauthAppHint(p: Provider): string {
     return `New OAuth App (cá nhân hoặc trong Organization). Callback URL: ${OAUTH_REDIRECT}. Tick "Enable Device Flow". Chỉ cần Client ID, không cần secret.`
   }
   return `Applications → Add new application. Redirect URI: ${OAUTH_REDIRECT}. Bỏ tick "Confidential". Scopes: api, read_repository, write_repository. Chỉ cần Application ID.`
+}
+
+// ── creating a repo on the provider (Publish) ──────────────────────────────
+
+/** A repo name as every provider takes it in a URL: letters, digits, `.`, `_`, `-`. */
+export function repoSlug(name: string): string {
+  return name.trim().replace(/[^A-Za-z0-9._-]+/g, '-').replace(/^[-.]+|[-.]+$/g, '').slice(0, 100)
+}
+
+/** Where the account can create repos besides its own space: GitHub orgs, Bitbucket workspaces, GitLab groups. */
+export function ownersUrl(a: Account): string {
+  const base = apiBase(a.provider, a.host)
+  if (a.provider === 'github') return `${base}/user/orgs?per_page=100`
+  if (a.provider === 'bitbucket') return BITBUCKET_WORKSPACES_URL
+  return `${base}/groups?min_access_level=30&per_page=100`
+}
+
+export function parseOwners(p: Provider, text: string): string[] {
+  if (p === 'bitbucket') return parseWorkspacePage(text).slugs
+  const list = JSON.parse(text) as { login?: string; full_path?: string }[]
+  return list.map(o => (p === 'github' ? o.login : o.full_path) ?? '').filter(Boolean)
+}
+
+export type NewRepo = { name: string; description: string; isPrivate: boolean }
+
+/**
+ * The request creating a repo: on GitHub under the user or an org, on Bitbucket in a workspace,
+ * on GitLab under the user or in a group (`groupId`, looked up from its path first).
+ */
+export function createRepoRequest(a: Account, owner: string, repo: NewRepo, groupId?: number): { url: string; body: string } {
+  const base = apiBase(a.provider, a.host)
+  const slug = repoSlug(repo.name)
+  if (a.provider === 'github') {
+    const url = !owner || owner.toLowerCase() === a.username.toLowerCase() ? `${base}/user/repos` : `${base}/orgs/${encodeURIComponent(owner)}/repos`
+    return { url, body: JSON.stringify({ name: slug, description: repo.description, private: repo.isPrivate, auto_init: false }) }
+  }
+  if (a.provider === 'bitbucket') {
+    return {
+      url: `${base}/repositories/${encodeURIComponent(owner)}/${encodeURIComponent(slug.toLowerCase())}`,
+      body: JSON.stringify({ scm: 'git', is_private: repo.isPrivate, description: repo.description }),
+    }
+  }
+  return {
+    url: `${base}/projects`,
+    body: JSON.stringify({
+      name: repo.name.trim() || slug,
+      path: slug,
+      description: repo.description,
+      visibility: repo.isPrivate ? 'private' : 'public',
+      ...(groupId ? { namespace_id: groupId } : {}),
+    }),
+  }
+}
+
+/** The new repo's web page and clone URLs, from the create response. */
+export function parseCreatedRepo(p: Provider, text: string): { webUrl: string; httpsUrl: string; sshUrl: string } {
+  const v = JSON.parse(text) as {
+    html_url?: string; clone_url?: string; ssh_url?: string
+    web_url?: string; http_url_to_repo?: string; ssh_url_to_repo?: string
+    links?: { html?: { href?: string }; clone?: { name?: string; href?: string }[] }
+  }
+  if (p === 'github') return { webUrl: v.html_url ?? '', httpsUrl: v.clone_url ?? '', sshUrl: v.ssh_url ?? '' }
+  if (p === 'gitlab') return { webUrl: v.web_url ?? '', httpsUrl: v.http_url_to_repo ?? '', sshUrl: v.ssh_url_to_repo ?? '' }
+  const clone = v.links?.clone ?? []
+  return {
+    webUrl: v.links?.html?.href ?? '',
+    httpsUrl: (clone.find(c => c.name === 'https')?.href ?? '').replace(/\/\/[^@/]+@/, '//'),
+    sshUrl: clone.find(c => c.name === 'ssh')?.href ?? '',
+  }
 }

@@ -1,6 +1,6 @@
-# git-client
+# Repo Pane for Git
 
-Một git client chạy ngay trong Claude Code (terminal và app desktop): pane **Git** bên cạnh hội thoại và một dòng trạng thái phía trên ô nhập.
+Một plugin cho Claude Code (terminal và app desktop) để làm việc với Git ngay trong Claude: một pane bên cạnh hội thoại và một dòng trạng thái phía trên ô nhập.
 
 ## Tính năng
 
@@ -11,30 +11,32 @@ Một git client chạy ngay trong Claude Code (terminal và app desktop): pane 
   - **Lịch sử**: tìm commit, đồ thị commit vẽ bằng SVG (dạng chữ trên terminal); cherry-pick, revert, reset, tạo branch/tag tại commit
   - **Git-flow**: bật như `git flow init` (tương thích git-flow AVH / SourceTree), bắt đầu và hoàn tất feature / bugfix / release / hotfix / support
   - **Stash**, **Tag**, **Pull request** (xem, tạo), **Nâng cao** (pull merge/rebase, force push with lease, reset, clean, worktree, submodule), **Cài đặt** (remote, user.name / user.email)
+  - **Publish lên remote**: repo chưa có remote thì tạo repo mới trên GitHub / Bitbucket / GitLab (public hoặc private), gắn `origin` rồi push
 - **Repo trên remote**: liệt kê repo của mọi tài khoản đã đăng nhập, tìm kiếm, clone.
 - **Tài khoản**: Bitbucket, GitHub, GitLab (cả GitHub Enterprise / GitLab tự host), ba kiểu đăng nhập:
   - OAuth qua trình duyệt (cần một OAuth app, xem bên dưới)
   - API token / personal access token: đọc từ clipboard, không gõ vào pane và không hiện ra
   - Chỉ SSH key: tạo key, copy public key, kiểm tra kết nối
   - Chọn giao thức HTTPS hoặc SSH cho từng tài khoản. Remote của repo và `~/.ssh/config` không bị sửa.
+- **Tool cho Claude**: `status`, `accounts`, `publish`, `push`, `pull`, `fetch`, `create_pull_request` (tên đầy đủ `mcp__repo-pane__<tool>`). Bạn nhờ Claude "tạo repo rồi push" hay "mở pull request", Claude làm bằng tài khoản đã đăng nhập trong plugin.
 
-Token và secret lưu trong macOS Keychain qua `git credential`. Mod không ghi chúng ra file nào.
+Token và secret lưu trong macOS Keychain qua `git credential`. Plugin không ghi chúng ra file nào.
 
 ## Cài đặt
 
 Trong một phiên Claude Code ở terminal:
 
 ```
-/plugin install git-client --marketplace okumurarin96/claude-git-client
+/plugin install repo-pane --marketplace okumurarin96/repo-pane
 ```
 
-Trả lời `y` để thêm marketplace, rồi chọn scope (mặc định: user). Mở pane bằng `/git-repos`.
+Trả lời `y` để thêm marketplace, rồi chọn scope (mặc định: user). Mở pane bằng `/repo-pane`.
 
-Lần đầu chạy, nếu chưa theo dõi repo nào, mod tự quét thư mục home để bạn chọn. Cũng có thể điền sẵn danh sách repo trong cài đặt plugin (`repos`, các đường dẫn ngăn cách bằng dấu phẩy).
+Lần đầu chạy, nếu chưa theo dõi repo nào, plugin tự quét thư mục home để bạn chọn. Cũng có thể điền sẵn danh sách repo trong cài đặt plugin (`repos`, các đường dẫn ngăn cách bằng dấu phẩy).
 
 ## OAuth một nút cho cả nhóm
 
-Mỗi nhà cung cấp cần một OAuth app, đăng ký một lần (giống Atlassian đã làm sẵn cho SourceTree). Callback / redirect URL: `http://127.0.0.1:53682/callback`.
+Mỗi nhà cung cấp cần một OAuth app, đăng ký một lần. Callback / redirect URL: `http://127.0.0.1:53682/callback`.
 
 | Nhà cung cấp | Tạo ở đâu | Điền vào cài đặt plugin |
 |---|---|---|
@@ -52,6 +54,13 @@ Có thể nhập các giá trị này ngay trong tab Tài khoản thay vì sửa
 ## Phát triển
 
 ```
-claude plugin validate .
 claude plugin test .
 ```
+
+## Giấy phép
+
+[Apache License 2.0](LICENSE).
+
+## Nhãn hiệu
+
+Git là nhãn hiệu của Software Freedom Conservancy; dự án này không liên kết với và không được Git Project chứng nhận. GitHub, Bitbucket, GitLab, Sourcetree và Claude là nhãn hiệu của chủ sở hữu tương ứng; các tên này chỉ dùng để mô tả khả năng tương thích.
