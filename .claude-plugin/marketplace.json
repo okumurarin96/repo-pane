@@ -1,0 +1,11 @@
+{
+  "name": "claude-git-client",
+  "owner": { "name": "okumurarin96" },
+  "plugins": [
+    {
+      "name": "git-client",
+      "source": "./",
+      "description": "A git client pane inside Claude Code: repos and worktrees, changes, commit, branches, history graph, git-flow, stash, tags, pull requests, clone, and sign-in for Bitbucket, GitHub and GitLab"
+    }
+  ]
+}

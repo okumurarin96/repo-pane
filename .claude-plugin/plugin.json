@@ -1,0 +1,77 @@
+{
+  "name": "git-client",
+  "version": "0.4.0",
+  "author": { "name": "okumurarin96" },
+  "repository": "https://github.com/okumurarin96/claude-git-client",
+  "description": "Git client pane: every repo and worktree at a glance, changes, commit, branches, drawn history graph, git-flow, stash, tags, pull requests, remote repo browser with clone, and OAuth or token sign-in for Bitbucket, GitHub and GitLab",
+  "types": "./types/index.d.ts",
+  "userConfig": {
+    "repos": {
+      "type": "string",
+      "title": "Repos",
+      "description": "Comma-separated absolute paths of repos to watch for everyone using this setup; repos can also be added from the pane",
+      "default": ""
+    },
+    "cloneDir": {
+      "type": "string",
+      "title": "Clone folder",
+      "description": "Folder new clones go into, one subfolder per repo; empty = your home folder",
+      "default": ""
+    },
+    "useSsh": {
+      "type": "boolean",
+      "title": "Fall back to SSH",
+      "description": "When an https fetch, pull, push or clone has no credentials, retry it over SSH without changing the repo's remotes",
+      "default": true
+    },
+    "fetchMinutes": {
+      "type": "number",
+      "title": "Fetch interval (minutes)",
+      "description": "How often to run git fetch on every repo; 0 turns periodic fetch off",
+      "default": 5
+    },
+    "refreshSeconds": {
+      "type": "number",
+      "title": "Local refresh interval (seconds)",
+      "description": "How often to re-read local status (no network)",
+      "default": 30
+    },
+    "bitbucketOAuthKey": {
+      "type": "string",
+      "title": "Bitbucket OAuth consumer key",
+      "description": "A team's Bitbucket OAuth consumer (callback http://127.0.0.1:53682/callback): everyone then signs in with one click",
+      "default": ""
+    },
+    "bitbucketOAuthSecret": {
+      "type": "string",
+      "title": "Bitbucket OAuth consumer secret",
+      "description": "The secret of that consumer",
+      "sensitive": true,
+      "default": ""
+    },
+    "githubOAuthClientId": {
+      "type": "string",
+      "title": "GitHub OAuth app client ID",
+      "description": "A GitHub OAuth app with Device Flow enabled: everyone then signs in with one click and a code",
+      "default": ""
+    },
+    "githubHost": {
+      "type": "string",
+      "title": "GitHub host",
+      "description": "github.com, or a GitHub Enterprise host",
+      "default": "github.com"
+    },
+    "gitlabOAuthClientId": {
+      "type": "string",
+      "title": "GitLab application ID",
+      "description": "A non-confidential GitLab application (redirect http://127.0.0.1:53682/callback, scopes api read_repository write_repository)",
+      "default": ""
+    },
+    "gitlabHost": {
+      "type": "string",
+      "title": "GitLab host",
+      "description": "gitlab.com, or a self-hosted GitLab host",
+      "default": "gitlab.com"
+    }
+  }
+}
