@@ -6,7 +6,7 @@ Một plugin cho Claude Code (terminal và app desktop) để làm việc với 
 
 - **Repo trên máy**: trạng thái mọi repo và worktree (branch, ↑ chưa push / ↓ cần pull, file thay đổi), fetch định kỳ, pull từng worktree hoặc tất cả.
 - **Từng repo**:
-  - **Thay đổi**: stage/unstage, xem diff, bỏ thay đổi, xử lý conflict, commit / amend / push ngay sau commit
+  - **Thay đổi**: nhóm file thu gọn được, lật trang 10 file và lọc theo tên; chọn nhiều file (☐) để stage / unstage / stash / bỏ / thêm .gitignore cùng lúc; menu ⋯ cho từng file; thao tác cho toàn bộ (stash tất cả, bỏ thay đổi chưa stage, xoá file mới, reset toàn bộ); diff dài cuộn 40 dòng một lần; xử lý conflict; **✨ Gợi ý commit message** bằng Claude theo phong cách repo, commit / amend / push ngay sau commit
   - **Branch**: tạo, checkout, merge, rebase, push, đổi tên, xoá, mở worktree; branch trên remote
   - **Lịch sử**: tìm commit, đồ thị commit vẽ bằng SVG (dạng chữ trên terminal); cherry-pick, revert, reset, tạo branch/tag tại commit
   - **Git-flow**: bật như `git flow init` (tương thích git-flow AVH / SourceTree), bắt đầu và hoàn tất feature / bugfix / release / hotfix / support

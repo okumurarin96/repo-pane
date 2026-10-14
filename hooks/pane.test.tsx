@@ -336,3 +336,71 @@ test('a moved remote, a dead remote and a missing folder each offer their fix', 
     await ui.unmount()
   }
 })
+
+test('changes: actions for every file and for all of them, and the commit box', async ($, on) => {
+  const state: Record<string, unknown> = {
+    repos: [REPO], view: 'repo', panel: PANEL, settings: SETTINGS,
+    selected: { repo: '/r', worktree: '/r', tab: 'changes' } as Selection,
+    flags: { 'filemenu:/r:lib/a.dart': true, 'filemenu:/r:new.txt': true, 'filemenu:/r:lib/staged.dart': true },
+  }
+  seed(on, state)
+  for (const surface of SURFACES) {
+    const ui = await $.ui.mount({ ...PANE, surface })
+    for (const key of [
+      'stage-all', 'unstage-all', 'stash-everything', 'discard-unstaged-all', 'discard-all', 'clean-new', 'reset-everything',
+      'fa:unstaged:drop:lib/a.dart', 'fa:unstaged:stash:lib/a.dart', 'fa:unstaged:copy:lib/a.dart', 'fa:unstaged:vscode:lib/a.dart',
+      'fa:untracked:delete:new.txt', 'fa:untracked:ignore:new.txt', 'fa:staged:drop:lib/staged.dart',
+      'suggest-message', 'in:commit:/r', 'in:commitbody:/r', 'reuse-message', 'commit',
+    ]) {
+      expect({ surface, key, found: Boolean(await ui.find({ key })) }).toEqual({ surface, key, found: true })
+    }
+    // a closed menu shows only the quick action
+    expect(await ui.find({ key: 'fa:conflict:vscode:lib/c.dart' })).toBeUndefined()
+    await ui.unmount()
+  }
+})
+
+test('long lists page, groups fold, a long diff scrolls, and several files can be picked', async ($, on) => {
+  const many = Array.from({ length: 25 }, (_, i) => ({ code: ' M', path: `src/f${String(i).padStart(2, '0')}.ts`, isStaged: false, isUnstaged: true, isUntracked: false, isConflicted: false }))
+  const wt = { ...REPO.worktrees[0]!, files: many, staged: 0, modified: 25, untracked: 0, conflicted: 0 }
+  const big: RepoStatus = { ...REPO, worktrees: [wt] }
+  const longDiff = ['@@ -1,120 +1,120 @@', ...Array.from({ length: 120 }, (_, i) => `+line ${i}`)].join('\n')
+  const state: Record<string, unknown> = {
+    repos: [big], view: 'repo', panel: PANEL, settings: SETTINGS,
+    selected: { repo: '/r', worktree: '/r', tab: 'changes' } as Selection,
+    flags: { 'pick:/r:src/f00.ts': true, 'pick:/r:src/f01.ts': true },
+    drafts: {},
+    diff: { title: 'big.ts', source: longDiff, format: 'diff' },
+  }
+  seed(on, state)
+  for (const surface of SURFACES) {
+    state.drafts = {}
+    const ui = await $.ui.mount({ ...PANE, surface })
+    expect(await ui.find({ key: 'diff:unstaged:src/f09.ts' })).toBeDefined()
+    expect(await ui.find({ key: 'diff:unstaged:src/f10.ts' })).toBeUndefined()
+    expect(await ui.find({ key: 'pg-next:unstaged' })).toBeDefined()
+    expect(await ui.find({ key: 'in:filefilter:/r' })).toBeDefined()
+    expect(await ui.find({ key: 'diff-down' })).toBeDefined()
+    expect(await ui.find({ key: 'diff-up' })).toBeUndefined()
+    expect(await ui.find({ key: 'picked-stage' })).toBeDefined()
+    expect(await ui.find({ key: 'pick:unstaged:src/f00.ts' })).toBeDefined()
+    expect(await ui.find({ key: 'menu:unstaged:src/f00.ts' })).toBeDefined()
+    expect(await ui.find({ key: 'pick-group:unstaged' })).toBeDefined()
+    await ui.unmount()
+
+    state.drafts = { 'page:/r:unstaged': '2', 'diffoff:big.ts': '80' }
+    const later = await $.ui.mount({ ...PANE, surface })
+    expect(await later.find({ key: 'diff:unstaged:src/f20.ts' })).toBeDefined()
+    expect(await later.find({ key: 'pg-prev:unstaged' })).toBeDefined()
+    expect(await later.find({ key: 'diff-up' })).toBeDefined()
+    await later.unmount()
+
+    state.drafts = { 'filefilter:/r': 'f2' }
+    state.flags = { 'fold:/r:conflict': true }
+    const filtered = await $.ui.mount({ ...PANE, surface })
+    expect(await filtered.find({ key: 'diff:unstaged:src/f21.ts' })).toBeDefined()
+    expect(await filtered.find({ key: 'diff:unstaged:src/f01.ts' })).toBeUndefined()
+    await filtered.unmount()
+    state.flags = { 'pick:/r:src/f00.ts': true, 'pick:/r:src/f01.ts': true }
+  }
+})

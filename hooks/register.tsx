@@ -29,6 +29,9 @@ const PANE = 'repo-pane'
 const TITLE = 'Repo Pane'
 const MAX_REMOTE_ROWS = 80
 const MAX_LIST = 120
+// lists and diffs are shown a window at a time: a pane has one scroll, so long ones page instead
+const FILE_PAGE = 10
+const DIFF_PAGE = 40
 // an SVG may carry at most 131072 characters: about 100 graph rows
 const GRAPH_ROWS = 90
 
@@ -677,6 +680,10 @@ async function confirmed($: EngineInterface) {
   const [action = '', a = '', b = '', c3 = ''] = c.key.split(SEP)
   switch (action) {
     case 'discard-file': return discardPath($, a, b, c3 === 'untracked')
+    case 'discard-unstaged-file': return discardUnstaged($, a, b)
+    case 'discard-unstaged-all': return act($, a, 'Bỏ mọi thay đổi chưa stage', ['restore', '--worktree', '--', '.'])
+    case 'reset-everything': return resetEverything($, a)
+    case 'discard-picked': return actOnPicked($, a, 'discard')
     case 'discard-all': return act($, a, 'Bỏ mọi thay đổi', ['restore', '--staged', '--worktree', '--source=HEAD', '--', '.'])
     case 'clean': return act($, a, 'Xoá file chưa theo dõi', ['clean', '-fd'])
     case 'delete-branch': return act($, a, `Xoá branch ${b}`, ['branch', c3 === 'force' ? '-D' : '-d', '--', b])
@@ -755,17 +762,201 @@ async function showFileDiff($: EngineInterface, cwd: string, f: ChangedFile, sta
 async function commit($: EngineInterface, cwd: string) {
   const d = await read($, drafts)
   const f = await read($, flags)
-  const message = (d[`commit:${cwd}`] ?? '').trim()
+  const subject = (d[`commit:${cwd}`] ?? '').trim()
+  const body = (d[`commitbody:${cwd}`] ?? '').trim()
+  const message = subject ? (body ? `${subject}\n\n${body}` : subject) : ''
   if (!message && !f.amend) {
-    void $.ui.toast('Nhập commit message trước')
+    void $.ui.toast('Nhập commit message trước (hoặc bấm Gợi ý message)')
     return
   }
   const args = ['commit', ...(f.amend ? ['--amend'] : []), ...(message ? ['-F', '-'] : ['--no-edit'])]
   const ok = await act($, cwd, f.amend ? 'Amend commit' : 'Commit', args, { stdin: message || undefined })
   if (!ok) return
   await setDraft($, `commit:${cwd}`, '')
+  await setDraft($, `commitbody:${cwd}`, '')
   if (f.amend) await update($, flags, x => ({ ...x, amend: false }))
   if (f.pushAfterCommit) await push($, cwd)
+}
+
+/**
+ * Asks Claude for a commit message for what is staged (or, with nothing staged, for every change),
+ * in the style of the repo's recent commits; fills the subject and body fields.
+ */
+async function suggestCommitMessage($: EngineInterface, cwd: string) {
+  const key = `suggest:${cwd}`
+  if ((await read($, busy))[key]) return
+  await setBusy($, key, 'Gợi ý message')
+  try {
+    let stat = (await git($, cwd, ['diff', '--cached', '--stat'])).stdout.trim()
+    let patch = (await git($, cwd, ['diff', '--cached'])).stdout
+    let scope = 'the staged changes'
+    if (!stat) {
+      stat = (await git($, cwd, ['diff', '--stat'])).stdout.trim()
+      patch = (await git($, cwd, ['diff'])).stdout
+      const fresh = (await git($, cwd, ['ls-files', '--others', '--exclude-standard'])).stdout.trim()
+      if (fresh) stat += `\nNew files:\n${fresh.split('\n').slice(0, 40).join('\n')}`
+      scope = 'all uncommitted changes (nothing is staged yet)'
+    }
+    if (!stat) {
+      void $.ui.toast('Không có thay đổi nào để viết message')
+      return
+    }
+    const branch = (await git($, cwd, ['rev-parse', '--abbrev-ref', 'HEAD'])).stdout.trim()
+    const recent = (await git($, cwd, ['log', '-n', '15', '--format=%s'])).stdout.trim()
+    const prompt = [
+      `Write a git commit message for ${scope}.`,
+      `Branch: ${branch}`,
+      recent ? `Recent commit subjects in this repo (match their language, format, prefixes and ticket ids):\n${recent}` : 'This repo has no commits yet.',
+      `Changed files:\n${stat}`,
+      `Diff (may be cut):\n${patch.slice(0, 14_000)}`,
+    ].join('\n\n')
+    const r = await $.model.complete({
+      model: 'haiku',
+      system: 'You write git commit messages. Reply with the message only: a subject line of at most 72 characters in the style of the recent commits (keep a ticket id from the branch name when the recent commits carry one), then, only when the change needs explaining, a blank line and a short body saying what changed and why. No quotes, no code fences, no preamble.',
+      prompt,
+      maxTokens: 400,
+      timeoutMs: 60_000,
+    })
+    if (!r.isAnswered) {
+      void $.ui.toast(`Không gợi ý được message (${r.reason})`)
+      return
+    }
+    const text = r.text.replace(/^```[a-z]*\n?|```$/g, '').trim()
+    const [subject = '', ...rest] = text.split('\n')
+    await setDraft($, `commit:${cwd}`, subject.trim())
+    await setDraft($, `commitbody:${cwd}`, rest.join('\n').trim())
+  } finally {
+    await setBusy($, key, null)
+  }
+}
+
+/** Moves a paged list (`page:<key>`) or the diff window (`diffoff:<title>`) to a position. */
+async function setPage($: EngineInterface, key: string, n: number) {
+  await setDraft($, `page:${key}`, String(Math.max(0, n)))
+}
+
+async function scrollDiff($: EngineInterface, title: string, line: number) {
+  await setDraft($, `diffoff:${title}`, String(Math.max(0, line)))
+}
+
+/** Picked files (several at once), kept as `pick:<cwd>:<path>` flags. */
+function pickedOf(f: Record<string, boolean>, cwd: string): string[] {
+  const prefix = `pick:${cwd}:`
+  return Object.keys(f).filter(k => f[k] && k.startsWith(prefix)).map(k => k.slice(prefix.length))
+}
+
+async function togglePick($: EngineInterface, cwd: string, path: string) {
+  await toggleFlag($, `pick:${cwd}:${path}`)
+}
+
+async function pickAll($: EngineInterface, cwd: string, paths: readonly string[], on: boolean) {
+  await update($, flags, f => {
+    const next = { ...f }
+    for (const p of paths) {
+      if (on) next[`pick:${cwd}:${p}`] = true
+      else delete next[`pick:${cwd}:${p}`]
+    }
+    return next
+  })
+}
+
+async function clearPicks($: EngineInterface, cwd: string) {
+  const prefix = `pick:${cwd}:`
+  await update($, flags, f => Object.fromEntries(Object.entries(f).filter(([k]) => !k.startsWith(prefix))))
+}
+
+/** The picked files that are still changed, split into tracked and new ones. */
+async function pickedFiles($: EngineInterface, cwd: string): Promise<{ tracked: string[]; fresh: string[]; all: string[] }> {
+  const picked = new Set(pickedOf(await read($, flags), cwd))
+  const wt = (await read($, repos)).flatMap(r => r.worktrees).find(w => w.path === cwd)
+  const files = (wt?.files ?? []).filter(x => picked.has(x.path))
+  const fresh = [...new Set(files.filter(x => x.isUntracked).map(x => x.path))]
+  const tracked = [...new Set(files.filter(x => !x.isUntracked).map(x => x.path))]
+  return { tracked, fresh, all: [...tracked, ...fresh] }
+}
+
+/** Runs one action on every picked file, then clears the picks. */
+async function actOnPicked($: EngineInterface, cwd: string, kind: 'stage' | 'unstage' | 'stash' | 'ignore' | 'discard') {
+  const { tracked, fresh, all } = await pickedFiles($, cwd)
+  if (all.length === 0) {
+    void $.ui.toast('Chưa chọn file nào')
+    return
+  }
+  const n = all.length
+  let ok = true
+  if (kind === 'stage') ok = await act($, cwd, `Stage ${n} file`, ['add', '--', ...all])
+  else if (kind === 'unstage') ok = tracked.length ? await act($, cwd, `Unstage ${tracked.length} file`, ['restore', '--staged', '--', ...tracked]) : true
+  else if (kind === 'stash') ok = await act($, cwd, `Stash ${n} file`, ['stash', 'push', '--include-untracked', '-m', `stash ${n} file`, '--', ...all])
+  else if (kind === 'ignore') {
+    if (fresh.length === 0) {
+      void $.ui.toast('Chỉ thêm được file mới vào .gitignore')
+      return
+    }
+    for (const path of fresh) await ignorePath($, cwd, path)
+  } else {
+    if (tracked.length) ok = await act($, cwd, `Bỏ thay đổi ${tracked.length} file`, ['restore', '--staged', '--worktree', '--source=HEAD', '--', ...tracked])
+    if (ok && fresh.length) ok = await act($, cwd, `Xoá ${fresh.length} file mới`, ['clean', '-f', '--', ...fresh])
+  }
+  if (ok) await clearPicks($, cwd)
+}
+
+async function askDiscardPicked($: EngineInterface, cwd: string) {
+  const { tracked, fresh } = await pickedFiles($, cwd)
+  if (tracked.length + fresh.length === 0) return
+  const parts = [tracked.length ? `bỏ mọi thay đổi của ${tracked.length} file` : '', fresh.length ? `XOÁ ${fresh.length} file mới` : ''].filter(Boolean)
+  await ask($, ['discard-picked', cwd].join(SEP), `${parts.join(' và ')}?`, truncateLines([...tracked, ...fresh].join('\n'), 15) + '\nKhông hoàn tác được.')
+}
+
+async function toggleFileMenu($: EngineInterface, cwd: string, path: string) {
+  await toggleFlag($, `filemenu:${cwd}:${path}`)
+}
+
+/** Drops only what is not staged yet in one file; the staged part stays. */
+async function discardUnstaged($: EngineInterface, cwd: string, path: string) {
+  await act($, cwd, `Bỏ phần chưa stage của ${path}`, ['restore', '--worktree', '--', path])
+}
+
+async function stashFile($: EngineInterface, cwd: string, path: string, isUntracked: boolean) {
+  await act($, cwd, `Stash ${path}`, ['stash', 'push', ...(isUntracked ? ['--include-untracked'] : []), '-m', `stash ${path}`, '--', path])
+}
+
+async function stashEverything($: EngineInterface, cwd: string) {
+  await act($, cwd, 'Stash mọi thay đổi', ['stash', 'push', '--include-untracked', '-m', 'Stash mọi thay đổi'])
+}
+
+/** Adds a path to the repo's .gitignore (anchored at the repo root), creating the file when needed. */
+async function ignorePath($: EngineInterface, cwd: string, path: string) {
+  const top = (await git($, cwd, ['rev-parse', '--show-toplevel'])).stdout.trim() || cwd
+  const file = `${top}/.gitignore`
+  let current = ''
+  try {
+    current = (await $.fs.exists(file)) ? String(await $.fs.read(file)) : ''
+  } catch {
+    current = ''
+  }
+  const line = `/${path.replace(/^\/+/, '')}`
+  if (current.split('\n').some(l => l.trim() === line)) {
+    void $.ui.toast(`${line} đã có trong .gitignore`)
+    return
+  }
+  await $.fs.write(file, `${current}${current && !current.endsWith('\n') ? '\n' : ''}${line}\n`)
+  void $.ui.toast(`Đã thêm ${line} vào .gitignore`)
+  await refreshFor($, cwd)
+}
+
+async function openFileIn($: EngineInterface, cwd: string, path: string, app: 'vscode' | 'finder') {
+  const full = `${cwd}/${path}`
+  const argv = app === 'vscode' ? ['open', '-a', 'Visual Studio Code', full] : ['open', '-R', full]
+  const r = await $.process.run(argv).catch(err => ({ exitCode: 1, stdout: '', stderr: String(err) }))
+  if (r.exitCode !== 0) void $.ui.toast(`Không mở được: ${lastLine(r.stderr)}`)
+}
+
+/** Puts the worktree back to the last commit: tracked changes dropped, new files deleted. */
+async function resetEverything($: EngineInterface, cwd: string) {
+  await runSteps($, cwd, 'Reset toàn bộ về commit gần nhất', [
+    { label: 'Bỏ mọi thay đổi của file đã theo dõi (reset --hard HEAD)', args: ['reset', '--hard', 'HEAD'] },
+    { label: 'Xoá file và thư mục chưa theo dõi (clean -fd)', args: ['clean', '-fd'] },
+  ])
 }
 
 // ── branches ───────────────────────────────────────────────────────────────
@@ -2677,7 +2868,26 @@ export const register: Register = (on, options) => {
           <Text bold>{df.title}</Text>
           <Button key="diff-close" label="Đóng" plain onPress={() => void closeDiff($)} />
         </Box>
-        <Code source={df.source} format={df.format} language={df.format === 'diff' ? undefined : 'text'} />
+        {(() => {
+          const lines = df.source.split('\n')
+          // a short diff shows whole, drawn as a diff; a long one shows DIFF_PAGE lines at a time, highlighted as diff text
+          if (lines.length <= DIFF_PAGE + 20) return <Code source={df.source} format={df.format} language={df.format === 'diff' ? undefined : 'text'} />
+          const last = Math.max(0, lines.length - DIFF_PAGE)
+          const off = Math.min(last, Math.max(0, Number(d[`diffoff:${df.title}`] ?? 0) || 0))
+          const end = Math.min(lines.length, off + DIFF_PAGE)
+          return (
+            <Box flexDirection="column">
+              <Box flexDirection="row" gap={1} alignItems="center" flexWrap="wrap">
+                <Text dimColor>dòng {off + 1}–{end} / {lines.length}</Text>
+                {off > 0 && <Button key="diff-top" label="⇤ Đầu" plain onPress={() => void scrollDiff($, df.title, 0)} />}
+                {off > 0 && <Button key="diff-up" label="▲ Lên" plain onPress={() => void scrollDiff($, df.title, off - DIFF_PAGE)} />}
+                {off < last && <Button key="diff-down" label="▼ Xuống" plain onPress={() => void scrollDiff($, df.title, off + DIFF_PAGE)} />}
+                {off < last && <Button key="diff-bottom" label="⇥ Cuối" plain onPress={() => void scrollDiff($, df.title, last)} />}
+              </Box>
+              <Code source={lines.slice(off, end).join('\n')} language={df.format === 'diff' ? 'diff' : 'text'} />
+            </Box>
+          )
+        })()}
       </Box>
     )
 
@@ -2992,29 +3202,48 @@ export const register: Register = (on, options) => {
         </Box>
       )
 
-      const fileRow = (file: ChangedFile, group: 'staged' | 'unstaged' | 'untracked' | 'conflict') => (
-        <Box flexDirection="row" gap={1} alignItems="center">
-          <Text color={group === 'conflict' ? 'error' : group === 'staged' ? 'success' : group === 'untracked' ? 'inactive' : 'warning'}>{file.code}</Text>
-          <Button key={`diff:${group}:${file.path}`} label={file.path} plain onPress={() => void showFileDiff($, cwd, file, group === 'staged')} />
-          {group === 'staged' && <Button key={`unstage:${file.path}`} label="Unstage" plain onPress={() => void unstage($, cwd, file.path)} />}
-          {(group === 'unstaged' || group === 'untracked') && <Button key={`stage:${group}:${file.path}`} label="Stage" plain onPress={() => void stage($, cwd, file.path)} />}
-          {(group === 'unstaged' || group === 'untracked') && (
-            <Button
-              key={`discard:${group}:${file.path}`}
-              label={group === 'untracked' ? 'Xoá' : 'Bỏ thay đổi'}
-              plain
-              onPress={() => void ask($, ['discard-file', cwd, file.path, group].join(SEP), group === 'untracked' ? `Xoá file mới ${file.path}?` : `Bỏ mọi thay đổi của ${file.path}?`, 'Không hoàn tác được.')}
-            />
-          )}
-          {group === 'conflict' && (
-            <Box flexDirection="row" gap={1}>
-              <Button key={`ours:${file.path}`} label="Dùng của mình" plain onPress={() => void resolve($, cwd, file.path, 'ours')} />
-              <Button key={`theirs:${file.path}`} label="Dùng của họ" plain onPress={() => void resolve($, cwd, file.path, 'theirs')} />
-              <Button key={`resolved:${file.path}`} label="Đã sửa tay xong" plain onPress={() => void markResolved($, cwd, file.path)} />
+      const fileRow = (file: ChangedFile, group: 'staged' | 'unstaged' | 'untracked' | 'conflict') => {
+        const isOpen = Boolean(f[`filemenu:${cwd}:${file.path}`])
+        const k = (action: string) => `fa:${group}:${action}:${file.path}`
+        return (
+          <Box flexDirection="column">
+            <Box flexDirection="row" gap={1} alignItems="center">
+              <Button key={`pick:${group}:${file.path}`} label={f[`pick:${cwd}:${file.path}`] ? '☑' : '☐'} plain onPress={() => void togglePick($, cwd, file.path)} />
+              <Button key={`menu:${group}:${file.path}`} label={isOpen ? '▾' : '⋯'} plain onPress={() => void toggleFileMenu($, cwd, file.path)} />
+              <Text color={group === 'conflict' ? 'error' : group === 'staged' ? 'success' : group === 'untracked' ? 'inactive' : 'warning'}>{file.code}</Text>
+              <Button key={`diff:${group}:${file.path}`} label={file.path} plain onPress={() => void showFileDiff($, cwd, file, group === 'staged')} />
+              {group === 'staged' && <Button key={`unstage:${file.path}`} label="Unstage" plain onPress={() => void unstage($, cwd, file.path)} />}
+              {(group === 'unstaged' || group === 'untracked') && <Button key={`stage:${group}:${file.path}`} label="Stage" plain onPress={() => void stage($, cwd, file.path)} />}
+              {group === 'conflict' && (
+                <Box flexDirection="row" gap={1}>
+                  <Button key={`ours:${file.path}`} label="Dùng của mình" plain onPress={() => void resolve($, cwd, file.path, 'ours')} />
+                  <Button key={`theirs:${file.path}`} label="Dùng của họ" plain onPress={() => void resolve($, cwd, file.path, 'theirs')} />
+                  <Button key={`resolved:${file.path}`} label="Đã sửa tay xong" plain onPress={() => void markResolved($, cwd, file.path)} />
+                </Box>
+              )}
             </Box>
-          )}
-        </Box>
-      )
+            {isOpen && (
+              <Box flexDirection="row" gap={1} paddingLeft={6} flexWrap="wrap">
+                <Button key={k('diff')} label={group === 'untracked' ? 'Xem nội dung' : group === 'staged' ? 'Xem diff đã stage' : 'Xem diff'} plain onPress={() => void showFileDiff($, cwd, file, group === 'staged')} />
+                {group === 'unstaged' && file.isStaged && (
+                  <Button key={k('drop-unstaged')} label="Bỏ phần chưa stage" plain onPress={() => void ask($, ['discard-unstaged-file', cwd, file.path].join(SEP), `Bỏ phần chưa stage của ${file.path}?`, 'Phần đã stage được giữ lại. Không hoàn tác được.')} />
+                )}
+                {(group === 'unstaged' || group === 'staged') && (
+                  <Button key={k('drop')} label="Bỏ mọi thay đổi" plain onPress={() => void ask($, ['discard-file', cwd, file.path, group].join(SEP), `Bỏ mọi thay đổi của ${file.path}?`, 'Cả phần đã stage lẫn chưa stage. Không hoàn tác được.')} />
+                )}
+                {group === 'untracked' && (
+                  <Button key={k('delete')} label="Xoá file" plain onPress={() => void ask($, ['discard-file', cwd, file.path, 'untracked'].join(SEP), `Xoá file mới ${file.path}?`, 'File chưa từng commit, xoá là mất. Không hoàn tác được.')} />
+                )}
+                {group === 'untracked' && <Button key={k('ignore')} label="Thêm vào .gitignore" plain onPress={() => void ignorePath($, cwd, file.path)} />}
+                {group !== 'conflict' && <Button key={k('stash')} label="Stash riêng file này" plain onPress={() => void stashFile($, cwd, file.path, group === 'untracked')} />}
+                <Button key={k('vscode')} label="Mở bằng VS Code" plain onPress={() => void openFileIn($, cwd, file.path, 'vscode')} />
+                <Button key={k('finder')} label="Hiện trong Finder" plain onPress={() => void openFileIn($, cwd, file.path, 'finder')} />
+                <Button key={k('copy')} label="Copy đường dẫn" plain onPress={press => void $.ui.copy({ text: file.path, surface: press.surface })} />
+              </Box>
+            )}
+          </Box>
+        )
+      }
 
       const section = (title: string, children: unknown, actions?: unknown) => (
         <Box flexDirection="column">
@@ -3033,23 +3262,109 @@ export const register: Register = (on, options) => {
         const staged = files.filter(x => x.isStaged)
         const unstaged = files.filter(x => x.isUnstaged)
         const untracked = files.filter(x => x.isUntracked)
+        const filter = (d[`filefilter:${cwd}`] ?? '').trim().toLowerCase()
+        const visible = (list: ChangedFile[]) => (filter ? list.filter(x => x.path.toLowerCase().includes(filter)) : list)
+        const fileGroup = (group: 'staged' | 'unstaged' | 'untracked' | 'conflict', title: string, all: ChangedFile[]) => {
+          if (all.length === 0) return null
+          const items = visible(all)
+          const foldKey = `fold:${cwd}:${group}`
+          const isFolded = Boolean(f[foldKey])
+          const pageKey = `${cwd}:${group}`
+          const pages = Math.max(1, Math.ceil(items.length / FILE_PAGE))
+          const page = Math.min(pages - 1, Math.max(0, Number(d[`page:${pageKey}`] ?? 0) || 0))
+          return (
+            <Box flexDirection="column">
+              <Box flexDirection="row" gap={1} alignItems="center">
+                {(() => {
+                  const allPicked = items.length > 0 && items.every(x => f[`pick:${cwd}:${x.path}`])
+                  return <Button key={`pick-group:${group}`} label={allPicked ? '☑' : '☐'} plain onPress={() => void pickAll($, cwd, items.map(x => x.path), !allPicked)} />
+                })()}
+                <Button key={`fold:${group}`} label={`${isFolded ? '▸' : '▾'} ${title} (${filter ? `${items.length}/` : ''}${all.length})`} plain onPress={() => void toggleFlag($, foldKey)} />
+                {!isFolded && pages > 1 && (
+                  <Box flexDirection="row" gap={1} alignItems="center">
+                    {page > 0 && <Button key={`pg-prev:${group}`} label="‹" plain onPress={() => void setPage($, pageKey, page - 1)} />}
+                    <Text dimColor>{page * FILE_PAGE + 1}–{Math.min(items.length, (page + 1) * FILE_PAGE)} / {items.length}</Text>
+                    {page < pages - 1 && <Button key={`pg-next:${group}`} label="›" plain onPress={() => void setPage($, pageKey, page + 1)} />}
+                  </Box>
+                )}
+              </Box>
+              {!isFolded && (
+                <Box flexDirection="column" paddingLeft={1}>
+                  {items.slice(page * FILE_PAGE, (page + 1) * FILE_PAGE).map(x => fileRow(x, group))}
+                  {items.length === 0 && <Text dimColor>Không có file nào khớp "{filter}".</Text>}
+                </Box>
+              )}
+            </Box>
+          )
+        }
+        const recentSubjects = (p?.log ?? []).map(c => c.subject).filter((x, i, all) => x && all.indexOf(x) === i).slice(0, 10)
+        const suggesting = Boolean(busyOf[`suggest:${cwd}`])
         body = (
           <Box flexDirection="column" gap={1}>
             {isClean(wt) && <Text color="success">● Không có thay đổi nào.</Text>}
-            {conflicts.length > 0 && section(`Conflict (${conflicts.length})`, conflicts.map(x => fileRow(x, 'conflict')))}
-            {staged.length > 0 && section(`Đã stage (${staged.length})`, staged.map(x => fileRow(x, 'staged')),
-              <Button key="unstage-all" label="Unstage tất cả" plain onPress={() => void unstageAll($, cwd)} />)}
-            {unstaged.length > 0 && section(`Đã sửa (${unstaged.length})`, unstaged.map(x => fileRow(x, 'unstaged')),
-              <Box flexDirection="row" gap={1}>
-                <Button key="stage-all" label="Stage tất cả" plain onPress={() => void stageAll($, cwd)} />
-                <Button key="discard-all" label="Bỏ hết thay đổi" plain onPress={() => void ask($, ['discard-all', cwd].join(SEP), 'Bỏ mọi thay đổi (cả đã stage) trong worktree này?', 'File mới chưa theo dõi được giữ lại. Không hoàn tác được.')} />
-              </Box>)}
-            {untracked.length > 0 && section(`File mới (${untracked.length})`, untracked.map(x => fileRow(x, 'untracked')),
-              <Button key="stage-all-new" label="Stage tất cả" plain onPress={() => void stageAll($, cwd)} />)}
+            {!isClean(wt) && (
+              <Box flexDirection="column" borderStyle="round" paddingX={1}>
+                <Text dimColor>
+                  {staged.length} đã stage · {unstaged.length} đã sửa · {untracked.length} file mới{conflicts.length ? ` · ${conflicts.length} conflict` : ''}
+                </Text>
+                <Box flexDirection="row" gap={1} flexWrap="wrap">
+                  {(unstaged.length > 0 || untracked.length > 0) && <Button key="stage-all" label="Stage tất cả" plain onPress={() => void stageAll($, cwd)} />}
+                  {staged.length > 0 && <Button key="unstage-all" label="Unstage tất cả" plain onPress={() => void unstageAll($, cwd)} />}
+                  <Button key="stash-everything" label="Stash tất cả" plain onPress={() => void stashEverything($, cwd)} />
+                  {unstaged.length > 0 && (
+                    <Button key="discard-unstaged-all" label="Bỏ thay đổi chưa stage" plain onPress={() => void ask($, ['discard-unstaged-all', cwd].join(SEP), 'Bỏ mọi thay đổi chưa stage?', 'Phần đã stage và file mới được giữ lại. Không hoàn tác được.')} />
+                  )}
+                  {(staged.length > 0 || unstaged.length > 0) && (
+                    <Button key="discard-all" label="Bỏ hết thay đổi" plain onPress={() => void ask($, ['discard-all', cwd].join(SEP), 'Bỏ mọi thay đổi (cả đã stage) của file đã theo dõi?', 'File mới chưa theo dõi được giữ lại. Không hoàn tác được.')} />
+                  )}
+                  {untracked.length > 0 && <Button key="clean-new" label="Xoá file mới" plain onPress={() => void askClean($, cwd)} />}
+                  <Button
+                    key="reset-everything"
+                    label="Reset toàn bộ"
+                    plain
+                    onPress={() => void ask($, ['reset-everything', cwd].join(SEP), 'Reset toàn bộ worktree về commit gần nhất?', `Bỏ mọi thay đổi (${staged.length + unstaged.length} file) và XOÁ ${untracked.length} file mới. Không hoàn tác được — muốn giữ lại thì dùng Stash tất cả.`)}
+                  />
+                </Box>
+              </Box>
+            )}
+            {files.length > 12 && draftInput(`filefilter:${cwd}`, 'Lọc file', 'gõ một phần tên hoặc đường dẫn')}
+            {(() => {
+              const picked = pickedOf(f, cwd).filter(path => files.some(x => x.path === path))
+              if (picked.length === 0) return <Text dimColor>Bấm ☐ để chọn nhiều file, ⋯ để xem thêm thao tác cho một file.</Text>
+              return (
+                <Box flexDirection="row" gap={1} alignItems="center" flexWrap="wrap" borderStyle="round" borderColor="suggestion" paddingX={1}>
+                  <Text bold color="suggestion">Đã chọn {picked.length} file:</Text>
+                  <Button key="picked-stage" label="Stage" plain onPress={() => void actOnPicked($, cwd, 'stage')} />
+                  <Button key="picked-unstage" label="Unstage" plain onPress={() => void actOnPicked($, cwd, 'unstage')} />
+                  <Button key="picked-stash" label="Stash" plain onPress={() => void actOnPicked($, cwd, 'stash')} />
+                  <Button key="picked-discard" label="Bỏ thay đổi / xoá" plain onPress={() => void askDiscardPicked($, cwd)} />
+                  <Button key="picked-ignore" label="Thêm vào .gitignore" plain onPress={() => void actOnPicked($, cwd, 'ignore')} />
+                  <Button key="picked-clear" label="Bỏ chọn" plain onPress={() => void clearPicks($, cwd)} />
+                </Box>
+              )
+            })()}
+            {fileGroup('conflict', 'Conflict', conflicts)}
+            {fileGroup('staged', 'Đã stage', staged)}
+            {fileGroup('unstaged', 'Đã sửa', unstaged)}
+            {fileGroup('untracked', 'File mới', untracked)}
             {files.length < wt.staged + wt.modified + wt.untracked + wt.conflicted && <Text dimColor>… danh sách bị cắt bớt</Text>}
             {Input && (
               <Box flexDirection="column" borderStyle="round" paddingX={1}>
-                {draftInput(`commit:${cwd}`, `Commit lên ${wt.branch}`, 'commit message', () => void commit($, cwd))}
+                <Box flexDirection="row" gap={1} alignItems="center" flexWrap="wrap">
+                  <Text bold>Commit lên {wt.branch}</Text>
+                  <Button key="suggest-message" label={suggesting ? '✨ Đang viết…' : '✨ Gợi ý message'} onPress={() => void suggestCommitMessage($, cwd)} />
+                  {Select && recentSubjects.length > 0 && (
+                    <Select
+                      key="reuse-message"
+                      label="Dùng lại"
+                      value=""
+                      options={[{ value: '', label: 'message cũ…' }, ...recentSubjects.map(m => ({ value: m, label: m.slice(0, 70) }))]}
+                      onSelect={v => v && void setDraft($, `commit:${cwd}`, v)}
+                    />
+                  )}
+                </Box>
+                {draftInput(`commit:${cwd}`, 'Tiêu đề', staged.length ? 'tóm tắt thay đổi' : 'stage file trước, hoặc bấm Gợi ý message', () => void commit($, cwd))}
+                {draftInput(`commitbody:${cwd}`, 'Mô tả (tuỳ chọn)', 'vì sao thay đổi')}
                 <Box flexDirection="row" gap={1} flexWrap="wrap" alignItems="center">
                   {flagButton('amend', 'Amend commit trước')}
                   {flagButton('pushAfterCommit', 'Push ngay sau khi commit')}
