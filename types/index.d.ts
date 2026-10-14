@@ -153,11 +153,24 @@ export type RemoteRepo = {
   httpsUrl: string
 }
 
+/** The repos one signed-in account can see, newest first, or why they could not be listed. */
+export type RemoteGroup = {
+  accountId: string
+  provider: Provider
+  host: string
+  username: string
+  repos: RemoteRepo[]
+  error: string | null
+}
+
 export type RemoteList = {
   isLoading: boolean
   at: number | null
   errors: string[]
+  /** Every repo once, across accounts. */
   repos: RemoteRepo[]
+  /** The same repos per account (a repo two accounts see is in both). */
+  groups: RemoteGroup[]
   onDisk: string[]
 }
 

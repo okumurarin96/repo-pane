@@ -4,7 +4,7 @@ import type { Account } from '../types'
 import {
   OAUTH_REDIRECT, authHeaders, authorizeUrl, createRepoRequest, ownersUrl, parseCreatedRepo, parseOwners, repoSlug, deviceCodeRequest, deviceTokenRequest, httpsWithUser, linkNext, loginOf,
   oauthAppPage, oauthGitUser, parseDeviceCode, parseWorkspacePage, parsePrs, parseRepoPage, parseTokenResponse, pkceChallenge, prCreateRequest, prListUrl,
-  providerForHost, repoListUrls, tokenRequest, verifyUrl,
+  providerForHost, repoApiUrl, repoListUrls, tokenRequest, verifyUrl,
 } from './providers'
 
 const base = { method: 'token' as const, protocol: 'https' as const, sshKey: '', gitUser: '', expiresAt: null, verifiedAt: null, error: null }
@@ -78,6 +78,12 @@ test('repo list URLs follow the account scopes', async () => {
   expect(repoListUrls(BB)[0]).toContain('/2.0/repositories/acme?pagelen=100')
   expect(repoListUrls(GH)[0]).toContain('https://api.github.com/user/repos?per_page=100')
   expect(repoListUrls(GL)[0]).toContain('https://gitlab.example.com/api/v4/groups/team%2Fweb/projects?include_subgroups=true')
+})
+
+test('the repo API address asked before a refused git run blames the token', async () => {
+  expect(repoApiUrl(BB, 'acme/web')).toBe('https://api.bitbucket.org/2.0/repositories/acme/web')
+  expect(repoApiUrl(GH, 'octo/tool')).toBe('https://api.github.com/repos/octo/tool')
+  expect(repoApiUrl(GL, 'team/web/app')).toBe('https://gitlab.example.com/api/v4/projects/team%2Fweb%2Fapp')
 })
 
 test('parses repo pages of the three providers', async () => {

@@ -1,9 +1,10 @@
 import { expect, test } from 'claude-code/testing'
 
 import {
-  READ_ONLY_CREDENTIALS, isRemoteGone, parseMovedNotice, rewriteRemoteUrl, cloneFolder, credentialRewriteArgs, diffHunks, parseKeyFingerprint, remoteHosts, sshArgv, sshCommand, sshGreeting, isAuthError, isClean, isValidRemoteUrl, parseBranches, parseLog, parseRemoteBranches,
+  READ_ONLY_CREDENTIALS, tokenGitUser, isRemoteGone, parseMovedNotice, rewriteRemoteUrl, cloneFolder, credentialRewriteArgs, diffHunks, parseKeyFingerprint, remoteHosts, sshArgv, sshCommand, sshGreeting, isAuthError, isClean, isValidRemoteUrl, parseBranches, parseLog, parseRemoteBranches,
   parseRemotes, parseRemoteUrl, parseStashes, parseStatus, parseTags, parseWorktreeList, remoteKey, sshRewriteArgs,
   worktreeFolder, worktreeLabel,
+  groupReposByAccount,
 } from './git'
 
 const U = '\x1f'
@@ -106,7 +107,16 @@ test('credential rewrite sends a signed-in account\'s git user, leaving the remo
     '-c', 'url.https://oauth2@gitlab.example.com/.insteadOf=https://gitlab.example.com/',
   ])
   // a token account whose name the remote already carries, or a remote with no name: git finds it as is
-  expect(credentialRewriteArgs('o\thttps://bitbucket.org/a/b.git (fetch)', [{ ...net, host: 'bitbucket.org', gitUser: 'alice', method: 'token' }])).toEqual([])
+  // a remote already carrying the account's git user is left alone
+  expect(credentialRewriteArgs('o\thttps://x-bitbucket-api-token-auth@bitbucket.org/a/b.git (fetch)', [{ ...net, host: 'bitbucket.org', gitUser: 'x-bitbucket-api-token-auth', method: 'token' }])).toEqual([])
+  // a token saved under the plugin's own name is sent under it, so other git tools never touch it
+  expect(credentialRewriteArgs('o\thttps://alice@bitbucket.org/a/b.git (fetch)', [{ ...net, host: 'bitbucket.org', gitUser: 'x-bitbucket-api-token-auth', method: 'token' }]))
+    .toEqual(['-c', 'url.https://x-bitbucket-api-token-auth@bitbucket.org/.insteadOf=https://alice@bitbucket.org/'])
+  expect(credentialRewriteArgs('o\thttps://github.com/o/r.git (fetch)', [{ ...net, host: 'github.com', gitUser: 'repo-pane-octo', method: 'token' }]))
+    .toEqual(['-c', 'url.https://repo-pane-octo@github.com/.insteadOf=https://github.com/'])
+  expect(tokenGitUser('bitbucket', 'alice')).toBe('x-bitbucket-api-token-auth')
+  expect(tokenGitUser('github', 'octo')).toBe('repo-pane-octo')
+  expect(tokenGitUser('gitlab', 'me')).toBe('me')
   // an account set to SSH sends the host's https remotes over SSH
   expect(credentialRewriteArgs(remoteV, [{ host: 'bitbucket.org', gitUser: 'git', method: 'ssh', protocol: 'ssh', sshKey: '/k' }]))
     .toEqual(['-c', 'url.git@bitbucket.org:.insteadOf=https://alice@bitbucket.org/'])
@@ -149,4 +159,23 @@ test('a moved remote: the notice, and the new URL in the old one\'s style', asyn
   expect(isRemoteGone('remote: Repository not found.')).toBe(true)
   expect(isRemoteGone('không có quyền truy cập repo')).toBe(true)
   expect(isRemoteGone('Could not resolve host: github.com')).toBe(false)
+})
+
+test('watched repos are grouped by the account they belong to', async () => {
+  const r = (name: string, remote: string | null) => ({ name, remote })
+  const acct = (id: string, host: string, username: string) => ({ id, host, username, gitUser: username, method: 'token' as const, protocol: 'https' as const, sshKey: '' })
+  const accounts = [acct('bb', 'bitbucket.org', 'alice'), acct('gh1', 'github.com', 'octo'), acct('gh2', 'github.com', 'work')]
+  const seen = { gh2: ['github.com/acme/api'] }
+  const groups = groupReposByAccount(
+    [r('web', 'bitbucket.org/acme/web'), r('local', null), r('api', 'github.com/acme/api'), r('tool', 'github.com/octo/tool'), r('mine', 'github.com/work/mine'), r('app', 'gitlab.com/team/app')],
+    accounts,
+    seen,
+  )
+  expect(groups.map(g => [g.key, g.repos.map(x => x.name)])).toEqual([
+    ['bb', ['web']],
+    ['gh1', ['tool']],
+    ['gh2', ['api', 'mine']],
+    ['host:gitlab.com', ['app']],
+    ['', ['local']],
+  ])
 })

@@ -75,9 +75,14 @@ const remoteRepo = (slug: string) => ({
   sshUrl: `git@bitbucket.org:acme/${slug}.git`, httpsUrl: `https://bitbucket.org/acme/${slug}.git`,
 })
 
+const REMOTE_REPOS = [remoteRepo('my-app'), remoteRepo('old-tool'), remoteRepo('new-service')]
 const REMOTE: RemoteList = {
   isLoading: false, at: 1, errors: [], onDisk: ['old-tool'],
-  repos: [remoteRepo('my-app'), remoteRepo('old-tool'), remoteRepo('new-service')],
+  repos: REMOTE_REPOS,
+  groups: [
+    { accountId: 'bitbucket:bitbucket.org:alice', provider: 'bitbucket', host: 'bitbucket.org', username: 'alice', repos: REMOTE_REPOS, error: null },
+    { accountId: 'github:github.com:octo', provider: 'github', host: 'github.com', username: 'octo', repos: [], error: 'HTTP 401' },
+  ],
 }
 
 const PANE = {
@@ -97,18 +102,34 @@ function seed(on: Parameters<TestBody>[1], state: Record<string, unknown>) {
 }
 
 test('repo list and the band', async ($, on) => {
-  seed(on, { repos: [REPO], view: 'repos' })
+  const many = Array.from({ length: 17 }, (_, i): RepoStatus => ({ ...REPO, name: `app-${String(i).padStart(2, '0')}`, path: `/m${i}`, remote: `github.com/octo/app-${i}` }))
+  const loose: RepoStatus = { ...REPO, name: 'loose', path: '/l', remote: null }
+  const state: Record<string, unknown> = { repos: [REPO, ...many, loose], view: 'repos', flags: {}, accounts: [ACCOUNT] }
+  seed(on, state)
   for (const surface of SURFACES) {
     const ui = await $.ui.mount({ ...PANE, surface })
     expect(await ui.find({ key: 'repo:/r' })).toBeDefined()
-    expect(await ui.find({ key: 'pull-all' })).toBeDefined()
-    expect(await ui.find({ key: 'tab-accounts' })).toBeDefined()
+    expect(await ui.find({ key: 'lfold:bitbucket:bitbucket.org:alice' })).toBeDefined()
+    expect(await ui.find({ key: 'lfold:none' })).toBeDefined()
+    expect(await ui.find({ key: 'repo:/l' })).toBeDefined()
+    // a group of 17 shows 15 and pages
+    expect(await ui.find({ key: 'lpg-next:host:github.com' })).toBeDefined()
+    expect(await ui.find({ key: 'repo:/m16' })).toBeUndefined()
     await ui.unmount()
+    state.flags = { 'lfold:bitbucket:bitbucket.org:alice': true }
+    const folded = await $.ui.mount({ ...PANE, surface })
+    expect(await folded.find({ key: 'repo:/r' })).toBeUndefined()
+    await folded.unmount()
+    state.flags = {}
+    const ui2 = await $.ui.mount({ ...PANE, surface })
+    expect(await ui2.find({ key: 'pull-all' })).toBeDefined()
+    expect(await ui2.find({ key: 'tab-accounts' })).toBeDefined()
+    await ui2.unmount()
     const band = await $.ui.mount({
       plugin: 'repo-pane', surface, component: 'AbovePrompt',
       props: { hasSurvey: false, isWorking: false, maxRows: 10, bodyColumns: 120, scroll: { offset: 0, bodyRows: 10 }, view: {} },
     })
-    expect(await band.find({ type: 'Text', text: /1 cần pull/ })).toBeDefined()
+    expect(await band.find({ type: 'Text', text: /cần pull/ })).toBeDefined()
     await band.unmount()
   }
 })
@@ -124,7 +145,7 @@ test('every repo tab draws, with its main controls', async ($, on) => {
   }
   seed(on, state)
   const expectKeys: Record<RepoTab, string[]> = {
-    changes: ['stage:unstaged:lib/a.dart', 'unstage:lib/staged.dart', 'ours:lib/c.dart', 'in:commit:/r', 'commit', 'confirm-yes', 'result-close', 'diff-close', 'worktree'],
+    changes: ['stage:unstaged:lib/a.dart', 'unstage:lib/staged.dart', 'ours:lib/c.dart', 'in:commit:/r', 'commit', 'confirm-yes', 'result-close', 'result-toggle', 'diff-close', 'worktree'],
     branches: ['create-branch', 'co:feature/y', 'del:feature/y', 'cor:origin/release', 'wt:feature/y'],
     history: ['show:abcdef0123', 'cp:abcdef0123', 'rh:abcdef0123', 'flag:graph', 'flag:graphCurrent'],
     flow: ['flow-start:feature', 'flow-start:hotfix', 'flag:flowPush', 'flow-fin:feature/y', 'flow-co:feature/y', 'in:flowtag'],
@@ -153,14 +174,14 @@ test('remote repos: open, watch or clone; and the accounts tab', async ($, on) =
     state.view = 'remote'
     state.drafts = {}
     const ui = await $.ui.mount({ ...PANE, surface })
-    expect(await ui.find({ key: 'open:bitbucket.org/acme/my-app' })).toBeDefined()
-    expect(await ui.find({ key: 'watch:bitbucket.org/acme/old-tool' })).toBeDefined()
-    expect(await ui.find({ key: 'clone:bitbucket.org/acme/new-service' })).toBeDefined()
+    expect(await ui.find({ key: 'open:bitbucket:bitbucket.org:alice|bitbucket.org/acme/my-app' })).toBeDefined()
+    expect(await ui.find({ key: 'watch:bitbucket:bitbucket.org:alice|bitbucket.org/acme/old-tool' })).toBeDefined()
+    expect(await ui.find({ key: 'clone:bitbucket:bitbucket.org:alice|bitbucket.org/acme/new-service' })).toBeDefined()
     await ui.unmount()
 
     state.drafts = { remoteq: 'new' }
     const filtered = await $.ui.mount({ ...PANE, surface })
-    expect(await filtered.find({ key: 'watch:bitbucket.org/acme/old-tool' })).toBeUndefined()
+    expect(await filtered.find({ key: 'watch:bitbucket:bitbucket.org:alice|bitbucket.org/acme/old-tool' })).toBeUndefined()
     await filtered.unmount()
 
     state.view = 'accounts'
@@ -403,4 +424,69 @@ test('long lists page, groups fold, a long diff scrolls, and several files can b
     await filtered.unmount()
     state.flags = { 'pick:/r:src/f00.ts': true, 'pick:/r:src/f01.ts': true }
   }
+})
+
+test('remote repos are grouped by account, each folding and paging, with its own error', async ($, on) => {
+  const many = Array.from({ length: 20 }, (_, i) => remoteRepo(`svc-${String(i).padStart(2, '0')}`))
+  const state: Record<string, unknown> = {
+    repos: [REPO], view: 'remote', accounts: [ACCOUNT], drafts: {}, flags: {},
+    remote: { ...REMOTE, repos: many, groups: [{ ...REMOTE.groups[0]!, repos: many }, REMOTE.groups[1]!] },
+  }
+  seed(on, state)
+  for (const surface of SURFACES) {
+    const ui = await $.ui.mount({ ...PANE, surface })
+    expect(await ui.find({ key: 'rfold:bitbucket:bitbucket.org:alice' })).toBeDefined()
+    expect(await ui.find({ key: 'rfold:github:github.com:octo' })).toBeDefined()
+    expect(await ui.find({ type: 'Text', text: /HTTP 401/ })).toBeDefined()
+    expect(await ui.find({ key: 'clone:bitbucket:bitbucket.org:alice|bitbucket.org/acme/svc-14' })).toBeDefined()
+    expect(await ui.find({ key: 'clone:bitbucket:bitbucket.org:alice|bitbucket.org/acme/svc-15' })).toBeUndefined()
+    expect(await ui.find({ key: 'rpg-next:bitbucket:bitbucket.org:alice' })).toBeDefined()
+    await ui.unmount()
+    state.flags = { 'rfold:bitbucket:bitbucket.org:alice': true }
+    const folded = await $.ui.mount({ ...PANE, surface })
+    expect(await folded.find({ key: 'clone:bitbucket:bitbucket.org:alice|bitbucket.org/acme/svc-00' })).toBeUndefined()
+    await folded.unmount()
+    state.flags = {}
+  }
+})
+
+test('state saved by an older version still draws (no groups, an old account form)', async ($, on) => {
+  const state: Record<string, unknown> = {
+    repos: [REPO], view: 'remote',
+    remote: { isLoading: false, at: 1, errors: [], repos: REMOTE_REPOS, onDisk: [] },
+    accountForm: { provider: 'bitbucket', host: 'bitbucket.org', username: '', email: '', scopes: '' },
+    ssh: { keys: [] },
+  }
+  seed(on, state)
+  for (const surface of SURFACES) {
+    for (const v of ['remote', 'accounts']) {
+      state.view = v
+      const ui = await $.ui.mount({ ...PANE, surface })
+      expect({ surface, v, drawn: Boolean(await ui.find({ key: 'refresh-view' })) }).toEqual({ surface, v, drawn: true })
+      await ui.unmount()
+    }
+  }
+})
+
+test('repos found on the machine and not watched are offered at the top of the list', async ($, on) => {
+  const state: Record<string, unknown> = {
+    repos: [REPO], view: 'repos', flags: { showFound: true },
+    scan: { isLoading: false, root: '/Users/me', found: ['/r', '/Users/me/other-app', '/Users/me/tools/cli'] },
+  }
+  seed(on, state)
+  for (const surface of SURFACES) {
+    const ui = await $.ui.mount({ ...PANE, surface })
+    expect(await ui.find({ type: 'Text', text: /Có 2 repo trên máy chưa theo dõi/ })).toBeDefined()
+    expect(await ui.find({ key: 'found-watch-all' })).toBeDefined()
+    expect(await ui.find({ key: 'found-watch:/Users/me/other-app' })).toBeDefined()
+    expect(await ui.find({ key: 'found-ignore:/Users/me/tools/cli' })).toBeDefined()
+    await ui.unmount()
+  }
+})
+
+test('tool answers reach Claude as text', async ($, on) => {
+  seed(on, { accounts: [ACCOUNT] })
+  const r = await $.tool.call({ tool: 'mcp__repo-pane__accounts' })
+  expect(typeof r.result).toBe('string')
+  expect(r.result).toBe(r.text)
 })

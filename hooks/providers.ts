@@ -202,6 +202,14 @@ export function parseRepoPage(a: Account, text: string, headers: Record<string, 
   return { repos, next: linkNext(headers) }
 }
 
+/** The API address of one repo, to ask whether the account's token can see it. */
+export function repoApiUrl(a: Pick<Account, 'provider' | 'host'>, path: string): string {
+  const base = apiBase(a.provider, a.host)
+  if (a.provider === 'bitbucket') return `${base}/repositories/${path}`
+  if (a.provider === 'github') return `${base}/repos/${path}`
+  return `${base}/projects/${encodeURIComponent(path)}`
+}
+
 export function prListUrl(a: Account, path: string): string {
   const base = apiBase(a.provider, a.host)
   if (a.provider === 'bitbucket') return `${base}/repositories/${path}/pullrequests?state=OPEN&pagelen=50`

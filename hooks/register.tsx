@@ -3,21 +3,21 @@ import type { EngineInterface, Register } from 'claude-code'
 
 import type {
   Account, AccountForm, ChangedFile, Confirm, DiffView, FetchInfo, FlowConfig, FlowKind, OAuthApp, OAuthProgress,
-  GitProtocol, OpState, RemoteMove, Panel, Provider, RemoteList, RemoteRepo, RepoSettings, RepoStatus, RepoTab, Result, ScanResult,
+  GitProtocol, OpState, RemoteGroup, RemoteMove, Panel, Provider, RemoteList, RemoteRepo, RepoSettings, RepoStatus, RepoTab, Result, ScanResult,
   Selection, SignInMethod, SshState, View, WorktreeStatus,
 } from '../types'
 import { FLOW_KINDS, finishSteps, flowBase, flowConfigArgs, flowDefaults, flowKindOf, parseFlowConfig } from './flow'
 import type { FlowStep } from './flow'
 import {
   BRANCH_FORMAT, LOG_FORMAT, REMOTE_BRANCH_FORMAT, STASH_FORMAT, TAG_FORMAT, accountForHost, ago, cloneFolder,
-  READ_ONLY_CREDENTIALS, credentialRewriteArgs, isRemoteGone, parseMovedNotice, rewriteRemoteUrl, parseKeyFingerprint, remoteHosts, sshArgv, sshCommand, sshGreeting,
+  READ_ONLY_CREDENTIALS, credentialRewriteArgs, tokenGitUser, isRemoteGone, parseMovedNotice, rewriteRemoteUrl, parseKeyFingerprint, remoteHosts, sshArgv, sshCommand, sshGreeting,
   diffHunks, explainNetworkError, isAuthError, isClean, isValidRemoteUrl, parseBranches, parseLog, parseRemoteBranches,
   parseRemoteUrl, parseRemotes, parseStashes, parseStatus, parseTags, parseWorktreeList, remoteKey, shortDate,
-  sshRewriteArgs, truncateLines, worktreeFolder, worktreeLabel,
+  sshRewriteArgs, truncateLines, worktreeFolder, worktreeLabel, groupReposByAccount,
 } from './git'
 import { GRAPH_FORMAT, graphSvg, parseGraphLog } from './graph'
 import {
-  BITBUCKET_WORKSPACES_URL, OAUTH_REDIRECT, PROVIDERS, apiError, createRepoRequest, ownersUrl, parseCreatedRepo,
+  BITBUCKET_WORKSPACES_URL, OAUTH_REDIRECT, PROVIDERS, apiError, repoApiUrl, createRepoRequest, ownersUrl, parseCreatedRepo,
   parseOwners, parseWorkspacePage, repoSlug, authHeaders, authorizeUrl, defaultHost, deviceCodeRequest, deviceTokenRequest,
   httpsWithUser, loginOf, matchesQuery, oauthAppHint, oauthAppPage, oauthGitUser, parseCreatedPr, parseDeviceCode,
   parsePrs, parseRepoPage, parseTokenResponse, pkceChallenge, prCreateRequest, prListUrl, providerForHost,
@@ -27,16 +27,35 @@ import type { TokenSet } from './providers'
 
 const PANE = 'repo-pane'
 const TITLE = 'Repo Pane'
-const MAX_REMOTE_ROWS = 80
 const MAX_LIST = 120
 // lists and diffs are shown a window at a time: a pane has one scroll, so long ones page instead
 const FILE_PAGE = 10
+// folders a repo scan never goes into: dependencies, caches and tool installs
+const SCAN_SKIP = ['node_modules', 'Library', '.Trash', 'Pods', '.nvm', '.cache', '.pub-cache', 'fvm', '.gradle', '.m2', '.cargo', '.rustup', '.pyenv', '.rbenv', '.npm']
+const REMOTE_PAGE = 15
+const LOCAL_PAGE = 15
+/** The last lines of a result's output shown when it is opened. */
+const RESULT_LINES = 30
 const DIFF_PAGE = 40
 // an SVG may carry at most 131072 characters: about 100 graph rows
 const GRAPH_ROWS = 90
 
 const repos = atom({ plugin: 'repo-pane', key: 'repos' } as const, [] as RepoStatus[])
-const fetchInfo = atom({ plugin: 'repo-pane', key: 'fetch' } as const, { at: null, isRunning: false, failed: 0 } as FetchInfo)
+// Object state keeps its shape across reloads of the module: a value saved by an older version lacks newer
+// fields, so every read of these goes through `withDefaults`, and session.start upgrades them once.
+const DEFAULT_FETCH: FetchInfo = { at: null, isRunning: false, failed: 0 }
+const DEFAULT_REMOTE: RemoteList = { isLoading: false, at: null, errors: [], repos: [], groups: [], onDisk: [] }
+const DEFAULT_FORM: AccountForm = {
+  provider: 'bitbucket', host: 'bitbucket.org', method: 'oauth', protocol: 'https', sshKey: '', username: '', email: '', scopes: '',
+}
+const DEFAULT_SSH: SshState = { keys: [], test: null, isTesting: false }
+const DEFAULT_SCAN: ScanResult = { isLoading: false, root: '', found: [] }
+
+function withDefaults<T extends object>(defaults: T, value: Partial<T> | null | undefined): T {
+  return { ...defaults, ...(value ?? {}) }
+}
+
+const fetchInfo = atom({ plugin: 'repo-pane', key: 'fetch' } as const, DEFAULT_FETCH)
 const refreshedAt = atom({ plugin: 'repo-pane', key: 'refreshedAt' } as const, null as number | null)
 const view = atom({ plugin: 'repo-pane', key: 'view' } as const, 'repos' as View)
 const selected = atom({ plugin: 'repo-pane', key: 'selected' } as const, null as Selection | null)
@@ -48,15 +67,13 @@ const flags = atom({ plugin: 'repo-pane', key: 'flags' } as const, {} as Record<
 const confirm = atom({ plugin: 'repo-pane', key: 'confirm' } as const, null as Confirm | null)
 const result = atom({ plugin: 'repo-pane', key: 'result' } as const, null as Result | null)
 const diff = atom({ plugin: 'repo-pane', key: 'diff' } as const, null as DiffView | null)
-const remote = atom({ plugin: 'repo-pane', key: 'remote' } as const, { isLoading: false, at: null, errors: [], repos: [], onDisk: [] } as RemoteList)
+const remote = atom({ plugin: 'repo-pane', key: 'remote' } as const, DEFAULT_REMOTE)
 const accounts = atom({ plugin: 'repo-pane', key: 'accounts' } as const, [] as Account[])
-const accountForm = atom({ plugin: 'repo-pane', key: 'accountForm' } as const, {
-  provider: 'bitbucket', host: 'bitbucket.org', method: 'oauth', protocol: 'https', sshKey: '', username: '', email: '', scopes: '',
-} as AccountForm)
-const ssh = atom({ plugin: 'repo-pane', key: 'ssh' } as const, { keys: [], test: null, isTesting: false } as SshState)
+const accountForm = atom({ plugin: 'repo-pane', key: 'accountForm' } as const, DEFAULT_FORM)
+const ssh = atom({ plugin: 'repo-pane', key: 'ssh' } as const, DEFAULT_SSH)
 const oauthApps = atom({ plugin: 'repo-pane', key: 'oauthApps' } as const, [] as OAuthApp[])
 const oauth = atom({ plugin: 'repo-pane', key: 'oauth' } as const, null as OAuthProgress | null)
-const scan = atom({ plugin: 'repo-pane', key: 'scan' } as const, { isLoading: false, root: '', found: [] } as ScanResult)
+const scan = atom({ plugin: 'repo-pane', key: 'scan' } as const, DEFAULT_SCAN)
 const owners = atom({ plugin: 'repo-pane', key: 'owners' } as const, {} as Record<string, string[]>)
 const moves = atom({ plugin: 'repo-pane', key: 'moves' } as const, {} as Record<string, RemoteMove>)
 const replacements = atom({ plugin: 'repo-pane', key: 'replacements' } as const, {} as Record<string, RemoteRepo[]>)
@@ -82,6 +99,8 @@ let isRefreshing = false
 
 /** Repos from the settings moved to another folder from the pane (old path → new), and ones hidden there. */
 let pathMoves: Record<string, string> = {}
+/** Repos found by the scan that the person chose not to be offered again. */
+let ignoredRepos: string[] = []
 let hiddenRepos: string[] = []
 
 /** Every watched repo: the settings' list (moved where the pane moved them) and the pane's own, less the hidden. */
@@ -132,7 +151,7 @@ async function gitNet($: EngineInterface, cwd: string, args: string[], timeoutMs
   const movedTo = parseMovedNotice(first.stderr)
   if (movedTo) await recordMove($, cwd, remoteV, movedTo)
   if (first.exitCode === 0 || !isAuthError(first.stderr)) return first
-  await markRefused($, hosts)
+  await markRefused($, remoteV)
   if (!cfg.useSsh) return first
   const rewrite = sshRewriteArgs(remoteV)
   return rewrite.length ? git($, cwd, [...READ_ONLY_CREDENTIALS, ...rewrite, ...args], timeoutMs, undefined, env) : first
@@ -207,8 +226,8 @@ async function findReplacements($: EngineInterface, repoPath: string) {
   const origin = await git($, repoPath, ['remote', 'get-url', 'origin'])
   const oldKey = origin.exitCode === 0 ? remoteKey(origin.stdout) : null
   const slug = (oldKey ?? repoPath).split('/').pop()?.toLowerCase() ?? ''
-  if ((await read($, remote)).at == null) await loadRemote($)
-  const found = (await read($, remote)).repos.filter(r => r.slug === slug && r.key !== oldKey).slice(0, 6)
+  if ((withDefaults(DEFAULT_REMOTE, await read($, remote))).at == null) await loadRemote($)
+  const found = (withDefaults(DEFAULT_REMOTE, await read($, remote))).repos.filter(r => r.slug === slug && r.key !== oldKey).slice(0, 6)
   await update($, replacements, x => ({ ...x, [repoPath]: found }))
   if (found.length === 0) {
     void $.ui.toast(`Không thấy repo "${slug}" trong các tài khoản đã đăng nhập: sửa URL tay ở tab Cài đặt`)
@@ -279,7 +298,7 @@ async function findMovedFolder($: EngineInterface, oldPath: string) {
   await setBusy($, oldPath, 'Tìm thư mục')
   try {
     const out = await $.process.run(
-      ['find', cfg.home, '-maxdepth', '3', '(', '-name', 'node_modules', '-o', '-name', 'Library', '-o', '-name', '.Trash', '-o', '-name', 'Pods', ')', '-prune', '-o', '-name', '.git', '-print'],
+      ['find', cfg.home, '-maxdepth', '3', '(', ...SCAN_SKIP.flatMap((n, i) => (i ? ['-o', '-name', n] : ['-name', n])), ')', '-prune', '-o', '-name', '.git', '-print'],
       { timeoutMs: 90_000 },
     ).catch(() => ({ exitCode: 1, stdout: '', stderr: '' }))
     const dirs = out.stdout.split('\n').filter(Boolean).map(p => p.replace(/\/\.git$/, ''))
@@ -300,12 +319,59 @@ const REFUSED = 'Nhà cung cấp từ chối token khi chạy git: token thiếu
 const MISSING = 'Không thấy token trong Keychain — đăng nhập lại'
 
 /** Notes on the https accounts of these hosts that the provider refused their token. */
-async function markRefused($: EngineInterface, hosts: readonly string[]) {
+/**
+ * Git was refused over https. Bitbucket (and others) answer a bad token and a repo the account cannot see
+ * with the same "Authentication failed", so the provider's API is asked about that repo with the token:
+ * 401 means the token itself is refused (noted on the account); 403 or 404 means the token is fine and
+ * the repo is out of reach (left to the repo's own fetch error).
+ */
+async function markRefused($: EngineInterface, remoteV: string) {
   const list = await read($, accounts)
-  const hit = hosts.map(h => accountForHost(list, h)).filter((a): a is Account => Boolean(a && a.method !== 'ssh' && a.protocol === 'https'))
-  if (hit.length === 0) return
-  const ids = new Set(hit.map(a => a.id))
-  await saveAccounts($, list.map(a => (ids.has(a.id) ? { ...a, error: REFUSED } : a)))
+  const refused = new Set<string>()
+  for (const rm of parseRemotes(remoteV)) {
+    const target = parseRemoteUrl(rm.fetchUrl)
+    if (!target) continue
+    const a = accountForHost(list, target.host)
+    if (!a || a.method === 'ssh' || a.protocol !== 'https' || refused.has(a.id)) continue
+    const token = await readSecret($, a.host, a.gitUser)
+    if (!token) continue // checkTokens reports a missing one
+    try {
+      const res = await $.http.fetch(repoApiUrl(a, target.path.replace(/\.git$/, '')), { headers: authHeaders(a, token) })
+      if (res.status === 401) refused.add(a.id)
+    } catch {
+      // no answer: say nothing rather than blame the token
+    }
+  }
+  if (refused.size === 0) return
+  await saveAccounts($, list.map(a => (refused.has(a.id) ? { ...a, error: REFUSED } : a)))
+}
+
+/** Clears the "refused" mark an earlier version could set for a repo the account simply cannot see. */
+async function clearRefusedMarks($: EngineInterface) {
+  const list = await read($, accounts)
+  if (list.some(a => a.error === REFUSED)) await saveAccounts($, list.map(a => (a.error === REFUSED ? { ...a, error: null } : a)))
+}
+
+/**
+ * Moves each token account's secret from the remote's user name (where other git tools could erase it)
+ * to the plugin's own name. The old entry is left for the tools that used it.
+ */
+async function moveTokensToOwnNames($: EngineInterface) {
+  const list = await read($, accounts)
+  let changed = false
+  const next: Account[] = []
+  for (const a of list) {
+    const own = a.method === 'token' ? tokenGitUser(a.provider, a.username) : a.gitUser
+    if (own === a.gitUser) {
+      next.push(a)
+      continue
+    }
+    const secret = await readSecret($, a.host, a.gitUser)
+    if (secret) await saveSecret($, a.host, own, secret)
+    next.push({ ...a, gitUser: own })
+    changed = true
+  }
+  if (changed) await saveAccounts($, next)
 }
 
 /** Marks the accounts whose token is no longer in the credential store, and clears that mark once it is back. */
@@ -556,7 +622,7 @@ async function fetchRepo($: EngineInterface, path: string): Promise<string | nul
 }
 
 async function fetchAll($: EngineInterface) {
-  const info = await read($, fetchInfo)
+  const info = withDefaults(DEFAULT_FETCH, await read($, fetchInfo))
   if (info.isRunning) return
   await update($, fetchInfo, f => ({ ...f, isRunning: true }))
   const paths = allPaths()
@@ -628,7 +694,7 @@ async function setTab($: EngineInterface, tab: RepoTab) {
 async function showView($: EngineInterface, next: View) {
   await update($, view, () => next)
   await update($, confirm, () => null)
-  if (next === 'remote' && (await read($, remote)).at == null) await loadRemote($)
+  if (next === 'remote' && (withDefaults(DEFAULT_REMOTE, await read($, remote))).at == null) await loadRemote($)
   if (next === 'accounts') {
     await loadSshKeys($)
     await checkTokens($)
@@ -1353,7 +1419,7 @@ function oauthHostFor(provider: Provider, form: AccountForm): string {
 /** Saves the OAuth app typed in the pane; a Bitbucket consumer's secret is read from the clipboard. */
 async function saveOAuthApp($: EngineInterface, provider: Provider) {
   const d = await read($, drafts)
-  const form = await read($, accountForm)
+  const form = withDefaults(DEFAULT_FORM, await read($, accountForm))
   const host = oauthHostFor(provider, form)
   const clientId = (d[`oauthid:${provider}`] ?? '').trim()
   if (!/^[\w.-]{6,200}$/.test(clientId)) {
@@ -1403,7 +1469,7 @@ function guessWorkspace(list: readonly RepoStatus[]): string {
 
 async function openOAuthAppPage($: EngineInterface, provider: Provider) {
   const d = await read($, drafts)
-  const form = await read($, accountForm)
+  const form = withDefaults(DEFAULT_FORM, await read($, accountForm))
   const ws = (d.oauthws ?? '').trim() || guessWorkspace(await read($, repos))
   await openUrl($, oauthAppPage(provider, oauthHostFor(provider, form), ws))
 }
@@ -1426,7 +1492,7 @@ async function oauthLogin($: EngineInterface, provider: Provider) {
     void $.ui.toast('Đang có một lần đăng nhập dở, huỷ nó trước')
     return
   }
-  const form = await read($, accountForm)
+  const form = withDefaults(DEFAULT_FORM, await read($, accountForm))
   const host = oauthHostFor(provider, form)
   const app = await appFor($, provider, host)
   if (!app || (provider === 'bitbucket' && !app.secret)) {
@@ -1549,7 +1615,7 @@ async function completeOAuth($: EngineInterface, provider: Provider, host: strin
     await oauthFailed($, provider, 'không đọc được username của tài khoản')
     return
   }
-  const form = await read($, accountForm)
+  const form = withDefaults(DEFAULT_FORM, await read($, accountForm))
   const account: Account = {
     id: `${provider}:${host}:${username}`,
     provider,
@@ -1627,7 +1693,7 @@ async function refreshAccount($: EngineInterface, a: Account): Promise<boolean> 
 }
 
 async function openTokenPage($: EngineInterface) {
-  const f = await read($, accountForm)
+  const f = withDefaults(DEFAULT_FORM, await read($, accountForm))
   await openUrl($, tokenPageUrl(f.provider, f.host || defaultHost(f.provider)))
 }
 
@@ -1649,7 +1715,7 @@ async function verifyToken($: EngineInterface, a: Account, token: string): Promi
  * checked against the provider, saved to git's credential store, and the clipboard is cleared.
  */
 async function login($: EngineInterface) {
-  const f = await read($, accountForm)
+  const f = withDefaults(DEFAULT_FORM, await read($, accountForm))
   const host = (f.host || defaultHost(f.provider)).trim().toLowerCase()
   const username = f.username.trim()
   if (!/^[a-z0-9.-]+$/.test(host) || !username || /[\s\n]/.test(username)) {
@@ -1691,7 +1757,7 @@ async function login($: EngineInterface) {
     }
     // GitHub and GitLab answer the token's own login: that is the name git must send
     const name = f.provider !== 'bitbucket' && check.login ? check.login : username
-    const account: Account = { ...draft, username: name, gitUser: name, verifiedAt: Date.now() }
+    const account: Account = { ...draft, username: name, gitUser: tokenGitUser(f.provider, name), verifiedAt: Date.now() }
     account.id = `${account.provider}:${account.host}:${account.username}`
     if (!(await saveSecret($, account.host, account.gitUser, token))) {
       void $.ui.toast('Không lưu được token vào Keychain')
@@ -1794,7 +1860,7 @@ async function loadSshKeys($: EngineInterface) {
 
 /** A new ed25519 key in ~/.ssh, never over an existing one; it becomes the form's key and its public half is copied. */
 async function generateSshKey($: EngineInterface) {
-  const form = await read($, accountForm)
+  const form = withDefaults(DEFAULT_FORM, await read($, accountForm))
   const host = (form.host || defaultHost(form.provider)).toLowerCase()
   const who = (form.username.trim() || 'me').replace(/[^\w.-]+/g, '-')
   const path = `${cfg.home}/.ssh/${form.provider}-${who}-${host.replace(/[^\w.-]+/g, '-')}`
@@ -1818,7 +1884,7 @@ async function generateSshKey($: EngineInterface) {
 
 /** Copies a public key and opens the provider's page for adding it. */
 async function copyPublicKey($: EngineInterface, keyPath: string) {
-  const form = await read($, accountForm)
+  const form = withDefaults(DEFAULT_FORM, await read($, accountForm))
   const pub = await $.process.run(['cat', `${keyPath}.pub`]).catch(() => ({ exitCode: 1, stdout: '', stderr: '' }))
   if (pub.exitCode !== 0 || !pub.stdout.trim()) {
     void $.ui.toast(`Không đọc được ${keyPath}.pub`)
@@ -1842,13 +1908,13 @@ async function testSsh($: EngineInterface, host: string, key: string): Promise<{
 }
 
 async function testFormSsh($: EngineInterface) {
-  const form = await read($, accountForm)
+  const form = withDefaults(DEFAULT_FORM, await read($, accountForm))
   await testSsh($, (form.host || defaultHost(form.provider)).toLowerCase(), form.sshKey)
 }
 
 /** Adds an account that reaches git over SSH only: the key must get in first. */
 async function sshLogin($: EngineInterface) {
-  const form = await read($, accountForm)
+  const form = withDefaults(DEFAULT_FORM, await read($, accountForm))
   const host = (form.host || defaultHost(form.provider)).trim().toLowerCase()
   const t = await testSsh($, host, form.sshKey)
   if (!t.ok) {
@@ -1878,7 +1944,7 @@ async function sshLogin($: EngineInterface) {
 
 /** Switches how git reaches an account's host: https with the saved token, or SSH with a key. */
 async function setAccountProtocol($: EngineInterface, id: string, protocol: GitProtocol) {
-  const form = await read($, accountForm)
+  const form = withDefaults(DEFAULT_FORM, await read($, accountForm))
   const list = (await read($, accounts)).map(a => (a.id === id ? { ...a, protocol, sshKey: protocol === 'ssh' ? a.sshKey || form.sshKey : a.sshKey } : a))
   await saveAccounts($, list)
   void $.ui.toast(`Git sẽ dùng ${protocol.toUpperCase()} cho tài khoản này`)
@@ -1947,7 +2013,7 @@ async function listAccountRepos($: EngineInterface, a: Account): Promise<{ repos
 
 /** Lists the repos every signed-in account can see, most recently updated first. */
 async function loadRemote($: EngineInterface) {
-  if ((await read($, remote)).isLoading) return
+  if ((withDefaults(DEFAULT_REMOTE, await read($, remote))).isLoading) return
   // an SSH-only account reaches git, not the provider's API
   const list = (await read($, accounts)).filter(a => a.method !== 'ssh')
   if (list.length === 0) {
@@ -1960,7 +2026,15 @@ async function loadRemote($: EngineInterface) {
   const all = results.flatMap(r => r.repos).filter(r => (seen.has(r.key) ? false : (seen.add(r.key), true)))
   all.sort((a, b) => b.updatedOn.localeCompare(a.updatedOn))
   const errors = results.map(r => r.error).filter((e): e is string => Boolean(e))
-  await update($, remote, r => ({ ...r, isLoading: false, at: Date.now(), errors, repos: all }))
+  const groups: RemoteGroup[] = list.map((a, i) => ({
+    accountId: a.id,
+    provider: a.provider,
+    host: a.host,
+    username: a.username,
+    repos: [...(results[i]?.repos ?? [])].sort((x, y) => y.updatedOn.localeCompare(x.updatedOn)),
+    error: results[i]?.error ?? null,
+  }))
+  await update($, remote, r => ({ ...r, isLoading: false, at: Date.now(), errors, repos: all, groups }))
   await markOnDisk($)
 }
 
@@ -2193,7 +2267,7 @@ async function flowFinish($: EngineInterface, cwd: string, branch: string) {
 // ── finding repos ──────────────────────────────────────────────────────────
 
 /** Looks for git repos under a folder (three levels down, skipping dependency and system folders). */
-async function scanRepos($: EngineInterface, rootIn?: string) {
+async function scanRepos($: EngineInterface, rootIn?: string, quiet = false) {
   const d = await read($, drafts)
   const root = (rootIn ?? d.scanroot ?? '').trim().replace(/\/+$/, '') || cfg.home
   if (!root.startsWith('/')) {
@@ -2202,14 +2276,14 @@ async function scanRepos($: EngineInterface, rootIn?: string) {
   }
   await update($, scan, s => ({ ...s, isLoading: true, root }))
   const r = await $.process.run(
-    ['find', root, '-maxdepth', '3', '(', '-name', 'node_modules', '-o', '-name', 'Library', '-o', '-name', '.Trash', '-o', '-name', 'Pods', ')', '-prune', '-o', '-name', '.git', '-print'],
+    ['find', root, '-maxdepth', '3', '(', ...SCAN_SKIP.flatMap((n, i) => (i ? ['-o', '-name', n] : ['-name', n])), ')', '-prune', '-o', '-name', '.git', '-print'],
     { timeoutMs: 90_000 },
   ).catch(err => ({ exitCode: 1, stdout: '', stderr: String(err) }))
   const dirs = r.stdout.split('\n').filter(Boolean).map(p => p.replace(/\/\.git$/, '')).sort()
   // a worktree or submodule inside a repo is reached through that repo
   const found = dirs.filter(p => !dirs.some(q => q !== p && p.startsWith(`${q}/`)))
   await update($, scan, () => ({ isLoading: false, root, found }))
-  if (found.length === 0) void $.ui.toast(`Không thấy repo nào trong ${root}`)
+  if (found.length === 0 && !quiet) void $.ui.toast(`Không thấy repo nào trong ${root}`)
 }
 
 async function addRepo($: EngineInterface, pathIn?: string) {
@@ -2226,6 +2300,12 @@ async function addRepo($: EngineInterface, pathIn?: string) {
   }
   await setDraft($, 'addrepo', '')
   await watch($, top.stdout.trim())
+}
+
+async function ignoreFound($: EngineInterface, paths: readonly string[]) {
+  ignoredRepos = [...new Set([...ignoredRepos, ...paths])]
+  await $.store.set('ignoredRepos', ignoredRepos)
+  await update($, flags, f => ({ ...f }))
 }
 
 async function watchAll($: EngineInterface, paths: readonly string[]) {
@@ -2568,7 +2648,13 @@ const TOOLS: { name: string; description: string; inputSchema: Record<string, un
   },
 ]
 
+/** A tool's answer as the engine takes it: the result is the text Claude reads. */
 async function runTool($: EngineInterface, name: string, input: Record<string, unknown>): Promise<ToolAnswer> {
+  const a = await runToolRaw($, name, input)
+  return 'isError' in a ? { isError: true, result: a.text, text: a.text } : { result: a.text, text: a.text }
+}
+
+async function runToolRaw($: EngineInterface, name: string, input: Record<string, unknown>): Promise<ToolAnswer> {
   switch (name) {
     case 'status': return toolStatus($, input)
     case 'accounts': return toolAccounts($)
@@ -2636,9 +2722,20 @@ export const register: Register = (on, options) => {
     hiddenRepos = Array.isArray(storedHidden) ? storedHidden.filter((p): p is string => typeof p === 'string') : []
     await loadAccounts($)
     await loadOAuthApps($)
+    await moveTokensToOwnNames($)
+    await clearRefusedMarks($)
+    // state saved by an older version of the module: bring it to the current shape
+    await update($, remote, r => withDefaults(DEFAULT_REMOTE, r))
+    await update($, accountForm, f => withDefaults(DEFAULT_FORM, f))
+    await update($, ssh, x => withDefaults(DEFAULT_SSH, x))
+    await update($, scan, x => withDefaults(DEFAULT_SCAN, x))
+    await update($, fetchInfo, x => withDefaults(DEFAULT_FETCH, x))
     void checkTokens($)
     // first run: nothing watched yet, so offer the repos found in the home folder
-    if (allPaths().length === 0 && cfg.home) void scanRepos($, cfg.home)
+    const storedIgnored = await $.store.get('ignoredRepos')
+    ignoredRepos = Array.isArray(storedIgnored) ? storedIgnored.filter((p): p is string => typeof p === 'string') : []
+    // look for repos on this machine that are not watched yet (offered at the top of the repo list)
+    if (cfg.home) void scanRepos($, cfg.home, true)
     void $.ui.open({ id: PANE, title: TITLE })
 
     void refresh($)
@@ -2670,7 +2767,7 @@ export const register: Register = (on, options) => {
     if (e.props.hasSurvey) return next(e)
     const { Box, Text, Button } = $.ui.resolve(e)
     const list = await read($, repos)
-    const info = await read($, fetchInfo)
+    const info = withDefaults(DEFAULT_FETCH, await read($, fetchInfo))
     const all = list.flatMap(r => r.worktrees)
     const behind = all.filter(w => w.upstream && w.behind > 0).length
     const dirty = all.filter(w => !isClean(w)).length
@@ -2701,7 +2798,7 @@ export const register: Register = (on, options) => {
     const Select = e.surface !== 'mobile' && 'Select' in ui ? ui.Select : null
 
     const list = await read($, repos)
-    const info = await read($, fetchInfo)
+    const info = withDefaults(DEFAULT_FETCH, await read($, fetchInfo))
     const current = await read($, view)
     const sel = await read($, selected)
     const p = await read($, panel)
@@ -2712,13 +2809,13 @@ export const register: Register = (on, options) => {
     const ask0 = await read($, confirm)
     const res = await read($, result)
     const df = await read($, diff)
-    const remoteList = await read($, remote)
+    const remoteList = withDefaults(DEFAULT_REMOTE, await read($, remote))
     const accts = await read($, accounts)
-    const form = await read($, accountForm)
+    const form = withDefaults(DEFAULT_FORM, await read($, accountForm))
     const apps = await read($, oauthApps)
     const progress = await read($, oauth)
-    const scanned = await read($, scan)
-    const sshState = await read($, ssh)
+    const scanned = withDefaults(DEFAULT_SCAN, await read($, scan))
+    const sshState = withDefaults(DEFAULT_SSH, await read($, ssh))
     const ownerLists = await read($, owners)
     const refreshedAtValue = await read($, refreshedAt)
     const movesOf = await read($, moves)
@@ -2851,16 +2948,30 @@ export const register: Register = (on, options) => {
       </Box>
     )
 
-    const resultBar = res && (
-      <Box flexDirection="column" borderStyle="round" borderColor={res.ok ? 'success' : 'error'} paddingX={1}>
-        <Box flexDirection="row" gap={1} alignItems="center">
-          <Text bold color={res.ok ? 'success' : 'error'}>{res.ok ? '✓' : '✗'} {res.label}</Text>
-          <Text dimColor>{ago(res.at, now)}</Text>
-          <Button key="result-close" label="Đóng" plain onPress={() => void closeResult($)} />
+    const resultBar = res && (() => {
+      const lines = res.text.trim().split('\n').filter(Boolean)
+      const isOpen = Boolean(f.resultOpen)
+      const shown = lines.slice(-RESULT_LINES)
+      return (
+        <Box flexDirection="column" borderStyle="round" borderColor={res.ok ? 'success' : 'error'} paddingX={1}>
+          <Box flexDirection="row" gap={1} alignItems="center" flexWrap="wrap">
+            <Text bold color={res.ok ? 'success' : 'error'}>{res.ok ? '✓' : '✗'} {res.label}</Text>
+            <Text dimColor>{ago(res.at, now)}</Text>
+            {!isOpen && lines.length > 0 && <Text dimColor wrap="truncate-end">{lines[lines.length - 1]}</Text>}
+            {lines.length > 0 && (
+              <Button key="result-toggle" label={isOpen ? '▾ Thu gọn' : `▸ Chi tiết (${lines.length} dòng)`} plain onPress={() => void toggleFlag($, 'resultOpen')} />
+            )}
+            <Button key="result-close" label="Đóng" plain onPress={() => void closeResult($)} />
+          </Box>
+          {isOpen && (
+            <Box flexDirection="column">
+              {lines.length > shown.length && <Text dimColor>… {lines.length - shown.length} dòng đầu ẩn bớt</Text>}
+              <Code source={shown.join('\n')} language="text" wrap="wrap" />
+            </Box>
+          )}
         </Box>
-        {res.text && <Code source={res.text} language="text" wrap="wrap" />}
-      </Box>
-    )
+      )
+    })()
 
     const diffBox = df && (
       <Box flexDirection="column" borderStyle="round" borderColor="suggestion" paddingX={1}>
@@ -2891,12 +3002,9 @@ export const register: Register = (on, options) => {
       </Box>
     )
 
-    const notices = (
-      <Box flexDirection="column" gap={1}>
-        {confirmBar}
-        {resultBar}
-      </Box>
-    )
+    // The result of the last action sits at the bottom of every view, one line until opened, so it never
+    // pushes what is being worked on down the pane as it comes and goes.
+    const notices = confirmBar
 
     // ── accounts ──
     if (current === 'accounts') {
@@ -3086,6 +3194,7 @@ export const register: Register = (on, options) => {
               ))}
             </Box>
           )}
+          {resultBar}
         </Box>
       )
     }
@@ -3095,14 +3204,59 @@ export const register: Register = (on, options) => {
       const local = new Map(list.filter(r => r.remote).map(r => [r.remote as string, r.path]))
       const onDisk = new Set(remoteList.onDisk)
       const q = d.remoteq ?? ''
-      const shown = remoteList.repos.filter(r => matchesQuery(r, q))
 
-      const action = (rr: RemoteRepo) => {
+      const action = (g: RemoteGroup, rr: RemoteRepo) => {
+        const id = `${g.accountId}|${rr.key}`
         const localPath = local.get(rr.key)
-        if (localPath) return <Button key={`open:${rr.key}`} label="Mở" onPress={() => void openRepo($, localPath)} />
+        if (localPath) return <Button key={`open:${id}`} label="Mở" plain onPress={() => void openRepo($, localPath)} />
         if (busyOf[`clone:${rr.key}`]) return <Text color="suggestion">đang clone…</Text>
-        if (onDisk.has(rr.slug)) return <Button key={`watch:${rr.key}`} label="Có thư mục · Theo dõi" onPress={() => void watch($, `${cfg.cloneDir}/${rr.slug}`)} />
-        return <Button key={`clone:${rr.key}`} label="Clone" onPress={() => void clone($, rr)} />
+        if (onDisk.has(rr.slug)) return <Button key={`watch:${id}`} label="Có thư mục · Theo dõi" plain onPress={() => void watch($, `${cfg.cloneDir}/${rr.slug}`)} />
+        return <Button key={`clone:${id}`} label="Clone" plain onPress={() => void clone($, rr)} />
+      }
+
+      const groupBox = (g: RemoteGroup) => {
+        const items = g.repos.filter(r => matchesQuery(r, q))
+        const foldKey = `rfold:${g.accountId}`
+        const isFolded = Boolean(f[foldKey])
+        const pageKey = `remote:${g.accountId}`
+        const pages = Math.max(1, Math.ceil(items.length / REMOTE_PAGE))
+        const page = Math.min(pages - 1, Math.max(0, Number(d[`page:${pageKey}`] ?? 0) || 0))
+        const cloned = g.repos.filter(r => local.has(r.key)).length
+        return (
+          <Box flexDirection="column">
+            <Box flexDirection="row" gap={1} alignItems="center" flexWrap="wrap">
+              <Button
+                key={`rfold:${g.accountId}`}
+                label={`${isFolded ? '▸' : '▾'} ${providerLabel(g.provider)} · ${g.username}@${g.host} (${q ? `${items.length}/` : ''}${g.repos.length})`}
+                plain
+                onPress={() => void toggleFlag($, foldKey)}
+              />
+              {cloned > 0 && <Text dimColor>{cloned} đã có trên máy</Text>}
+              {!isFolded && pages > 1 && (
+                <Box flexDirection="row" gap={1} alignItems="center">
+                  {page > 0 && <Button key={`rpg-prev:${g.accountId}`} label="‹" plain onPress={() => void setPage($, pageKey, page - 1)} />}
+                  <Text dimColor>{page * REMOTE_PAGE + 1}–{Math.min(items.length, (page + 1) * REMOTE_PAGE)} / {items.length}</Text>
+                  {page < pages - 1 && <Button key={`rpg-next:${g.accountId}`} label="›" plain onPress={() => void setPage($, pageKey, page + 1)} />}
+                </Box>
+              )}
+            </Box>
+            {g.error && <Text color="error">  {g.error}</Text>}
+            {!isFolded && (
+              <Box flexDirection="column" paddingLeft={2}>
+                {items.slice(page * REMOTE_PAGE, (page + 1) * REMOTE_PAGE).map(rr => (
+                  <Box flexDirection="row" gap={1} alignItems="center">
+                    <Text color={local.has(rr.key) ? 'success' : 'inactive'}>{local.has(rr.key) ? '●' : '○'}</Text>
+                    <Text bold wrap="truncate-middle">{rr.fullName}</Text>
+                    {rr.mainBranch && <Text color="inactive">{rr.mainBranch}</Text>}
+                    <Text dimColor>{shortDate(rr.updatedOn)}</Text>
+                    {action(g, rr)}
+                  </Box>
+                ))}
+                {items.length === 0 && !g.error && <Text dimColor>{q ? 'Không có repo nào khớp.' : 'Tài khoản này chưa có repo nào.'}</Text>}
+              </Box>
+            )}
+          </Box>
+        )
       }
 
       return (
@@ -3111,29 +3265,14 @@ export const register: Register = (on, options) => {
           {notices}
           <Box flexDirection="row" gap={1} alignItems="center" flexWrap="wrap">
             <Text dimColor>
-              {remoteList.isLoading ? 'Đang tải danh sách…' : `${accts.length} tài khoản · ${remoteList.repos.length} repo · cập nhật ${ago(remoteList.at, now)}`}
+              {remoteList.isLoading ? 'Đang tải danh sách…' : `${remoteList.groups.length} tài khoản · ${remoteList.repos.length} repo · cập nhật ${ago(remoteList.at, now)}`}
             </Text>
-            <Button key="remote-reload" label="Tải lại" onPress={() => void loadRemote($)} />
             <Text dimColor>Clone vào {cfg.cloneDir}</Text>
           </Box>
           {draftInput('remoteq', 'Tìm repo', 'tên, project, mô tả, host…')}
-          {remoteList.errors.map(err => <Text color="error">{err}</Text>)}
-          <Box flexDirection="column">
-            {shown.slice(0, MAX_REMOTE_ROWS).map(rr => (
-              <Box flexDirection="row" gap={1} alignItems="center">
-                <Text dimColor>{providerLabel(rr.provider)}</Text>
-                <Text bold wrap="truncate-middle">{rr.fullName}</Text>
-                {rr.project && <Text dimColor wrap="truncate-end">{rr.project}</Text>}
-                {rr.mainBranch && <Text color="inactive">{rr.mainBranch}</Text>}
-                <Text dimColor>{shortDate(rr.updatedOn)}</Text>
-                {action(rr)}
-              </Box>
-            ))}
-            {shown.length > MAX_REMOTE_ROWS && <Text dimColor>… còn {shown.length - MAX_REMOTE_ROWS} repo nữa, gõ để lọc</Text>}
-            {!remoteList.isLoading && remoteList.at != null && shown.length === 0 && remoteList.errors.length === 0 && (
-              <Text dimColor>Không có repo nào khớp.</Text>
-            )}
-          </Box>
+          {remoteList.groups.length === 0 && remoteList.errors.map(err => <Text color="error">{err}</Text>)}
+          {remoteList.groups.map(groupBox)}
+          {resultBar}
         </Box>
       )
     }
@@ -3772,6 +3911,7 @@ export const register: Register = (on, options) => {
           {diffBox}
           {p?.isLoading && !p.log.length && <Text dimColor>Đang đọc…</Text>}
           {body as never}
+          {resultBar}
         </Box>
       )
     }
@@ -3790,12 +3930,36 @@ export const register: Register = (on, options) => {
           {behindCount > 0 && <Button key="pull-all" hotkey="p" label={`Pull tất cả (${behindCount})`} onPress={() => void pullAll($)} />}
         </Box>
         {notices}
+        {(() => {
+          const shownPaths = new Set([...allPaths(), ...list.map(x => x.path)])
+          const fresh = scanned.found.filter(p => !shownPaths.has(p) && !ignoredRepos.includes(p))
+          if (scanned.isLoading || fresh.length === 0) return null
+          const isOpen = Boolean(f.showFound)
+          return (
+            <Box flexDirection="column" borderStyle="round" borderColor="suggestion" paddingX={1}>
+              <Box flexDirection="row" gap={1} alignItems="center" flexWrap="wrap">
+                <Text color="suggestion">Có {fresh.length} repo trên máy chưa theo dõi</Text>
+                <Button key="found-toggle" label={isOpen ? 'Thu lại' : 'Xem'} plain onPress={() => void toggleFlag($, 'showFound')} />
+                <Button key="found-watch-all" variant="primary" label={`Theo dõi cả ${fresh.length}`} onPress={() => void watchAll($, fresh)} />
+                <Button key="found-ignore-all" label="Ẩn hết" plain onPress={() => void ignoreFound($, fresh)} />
+              </Box>
+              {isOpen && fresh.map(path => (
+                <Box flexDirection="row" gap={1} alignItems="center">
+                  <Text wrap="truncate-middle">{path.startsWith(`${cfg.home}/`) ? `~/${path.slice(cfg.home.length + 1)}` : path}</Text>
+                  <Button key={`found-watch:${path}`} label="Theo dõi" plain onPress={() => void watch($, path)} />
+                  <Button key={`found-ignore:${path}`} label="Ẩn" plain onPress={() => void ignoreFound($, [path])} />
+                </Box>
+              ))}
+            </Box>
+          )
+        })()}
         {allPaths().length === 0 && (
           <Text>Chưa theo dõi repo nào. Thêm đường dẫn repo hoặc quét một thư mục bên dưới.</Text>
         )}
         {allPaths().length > 0 && list.length === 0 && <Text dimColor>Đang đọc trạng thái…</Text>}
-        <Box flexDirection="column">
-          {list.map(r => {
+        {(() => {
+          const seenByAccount = Object.fromEntries(remoteList.groups.map(rg => [rg.accountId, rg.repos.map(rr => rr.key)]))
+          const repoRow = (r: RepoStatus) => {
             const worst = r.error || r.worktrees.some(w => w.error || w.conflicted) ? 'error' : r.worktrees.every(isClean) ? 'success' : 'warning'
             const main = r.worktrees[0]
             const dirty = r.worktrees.filter(w => !isClean(w)).length
@@ -3818,8 +3982,51 @@ export const register: Register = (on, options) => {
                 {r.error && <Text color="error">  {r.error}</Text>}
               </Box>
             )
-          })}
-        </Box>
+          }
+          return (
+            <Box flexDirection="column" gap={1}>
+              {groupReposByAccount(list, accts, seenByAccount).map(g => {
+                const id = g.key || 'none'
+                const foldKey = `lfold:${id}`
+                const isFolded = Boolean(f[foldKey])
+                const pageKey = `local:${id}`
+                const pages = Math.max(1, Math.ceil(g.repos.length / LOCAL_PAGE))
+                const page = Math.min(pages - 1, Math.max(0, Number(d[`page:${pageKey}`] ?? 0) || 0))
+                const provider = g.host ? providerForHost(g.host, accts) : null
+                const wts = g.repos.flatMap(r => r.worktrees)
+                const toPull = wts.filter(w => w.upstream && w.behind > 0).length
+                const dirty = wts.filter(w => !isClean(w)).length
+                const failed = g.repos.filter(r => r.error || r.fetchError || r.isMissing || r.worktrees.some(w => w.error || w.conflicted)).length
+                const title = g.account
+                  ? `${providerLabel(g.account.provider)} · ${g.account.username}@${g.account.host}`
+                  : g.host ? `${provider ? `${providerLabel(provider)} · ` : ''}${g.host} (chưa đăng nhập)` : 'Chưa có remote'
+                return (
+                  <Box flexDirection="column">
+                    <Box flexDirection="row" gap={1} alignItems="center" flexWrap="wrap">
+                      <Button key={foldKey} label={`${isFolded ? '▸' : '▾'} ${title} (${g.repos.length})`} plain onPress={() => void toggleFlag($, foldKey)} />
+                      {g.account?.error && <Text color="error">tài khoản đang lỗi</Text>}
+                      {failed > 0 && <Text color="error">✗{failed}</Text>}
+                      {toPull > 0 && <Text color="warning">↓{toPull}</Text>}
+                      {dirty > 0 && <Text color="warning">◐{dirty}</Text>}
+                      {!isFolded && pages > 1 && (
+                        <Box flexDirection="row" gap={1} alignItems="center">
+                          {page > 0 && <Button key={`lpg-prev:${id}`} label="‹" plain onPress={() => void setPage($, pageKey, page - 1)} />}
+                          <Text dimColor>{page * LOCAL_PAGE + 1}–{Math.min(g.repos.length, (page + 1) * LOCAL_PAGE)} / {g.repos.length}</Text>
+                          {page < pages - 1 && <Button key={`lpg-next:${id}`} label="›" plain onPress={() => void setPage($, pageKey, page + 1)} />}
+                        </Box>
+                      )}
+                    </Box>
+                    {!isFolded && (
+                      <Box flexDirection="column" paddingLeft={2}>
+                        {g.repos.slice(page * LOCAL_PAGE, (page + 1) * LOCAL_PAGE).map(repoRow)}
+                      </Box>
+                    )}
+                  </Box>
+                )
+              })}
+            </Box>
+          )
+        })()}
         {list.length > 0 && <Text dimColor>Bấm tên repo để mở: thay đổi, branch, lịch sử, git-flow, stash, tag, pull request, nâng cao, cài đặt.</Text>}
         {Input && (
           <Box flexDirection="column" gap={1} borderStyle="round" paddingX={1}>
@@ -3851,6 +4058,7 @@ export const register: Register = (on, options) => {
             })()}
           </Box>
         )}
+        {resultBar}
       </Box>
     )
   })

@@ -4,7 +4,7 @@ Một plugin cho Claude Code (terminal và app desktop) để làm việc với 
 
 ## Tính năng
 
-- **Repo trên máy**: trạng thái mọi repo và worktree (branch, ↑ chưa push / ↓ cần pull, file thay đổi), fetch định kỳ, pull từng worktree hoặc tất cả.
+- **Repo trên máy**: trạng thái mọi repo và worktree (branch, ↑ chưa push / ↓ cần pull, file thay đổi), gom theo tài khoản (thu gọn, lật trang), fetch định kỳ, pull từng worktree hoặc tất cả. Repo trên máy chưa theo dõi được báo để thêm hoặc bỏ qua.
 - **Từng repo**:
   - **Thay đổi**: nhóm file thu gọn được, lật trang 10 file và lọc theo tên; chọn nhiều file (☐) để stage / unstage / stash / bỏ / thêm .gitignore cùng lúc; menu ⋯ cho từng file; thao tác cho toàn bộ (stash tất cả, bỏ thay đổi chưa stage, xoá file mới, reset toàn bộ); diff dài cuộn 40 dòng một lần; xử lý conflict; **✨ Gợi ý commit message** bằng Claude theo phong cách repo, commit / amend / push ngay sau commit
   - **Branch**: tạo, checkout, merge, rebase, push, đổi tên, xoá, mở worktree; branch trên remote
@@ -12,11 +12,12 @@ Một plugin cho Claude Code (terminal và app desktop) để làm việc với 
   - **Git-flow**: bật như `git flow init` (tương thích git-flow AVH / SourceTree), bắt đầu và hoàn tất feature / bugfix / release / hotfix / support
   - **Stash**, **Tag**, **Pull request** (xem, tạo), **Nâng cao** (pull merge/rebase, force push with lease, reset, clean, worktree, submodule), **Cài đặt** (remote, user.name / user.email)
   - **Publish lên remote**: repo chưa có remote thì tạo repo mới trên GitHub / Bitbucket / GitLab (public hoặc private), gắn `origin` rồi push
-- **Repo trên remote**: liệt kê repo của mọi tài khoản đã đăng nhập, tìm kiếm, clone.
+- **Repo trên remote**: liệt kê repo theo từng tài khoản đã đăng nhập, tìm kiếm, clone.
 - **Khi có gì thay đổi**:
   - Repo trên remote đổi tên hoặc chuyển owner: plugin nhận ra từ thông báo của nhà cung cấp và có nút **Cập nhật URL**.
   - Link remote không còn: **Tìm link mới** trong các tài khoản, hoặc sửa URL tay; nút **Kiểm tra link remote** trong tab Cài đặt.
   - Thư mục repo bị đổi tên, di chuyển hoặc xoá: **Chỉ lại thư mục**, **Tìm thư mục** (theo remote) hoặc **Bỏ theo dõi**.
+- Kết quả thao tác gần nhất nằm ở cuối pane, gọn một dòng, mở ra xem chi tiết.
 - **⟳ Làm mới** trên thanh trên cùng (phím `r`): đọc lại đúng thứ đang xem (repo, danh sách trên remote, hoặc kiểm tra lại mọi tài khoản).
 - **Tài khoản**: Bitbucket, GitHub, GitLab (cả GitHub Enterprise / GitLab tự host), ba kiểu đăng nhập:
   - OAuth qua trình duyệt (cần một OAuth app, xem bên dưới)
@@ -25,7 +26,7 @@ Một plugin cho Claude Code (terminal và app desktop) để làm việc với 
   - Chọn giao thức HTTPS hoặc SSH cho từng tài khoản. Remote của repo và `~/.ssh/config` không bị sửa.
 - **Tool cho Claude**: `status`, `accounts`, `publish`, `push`, `pull`, `fetch`, `create_pull_request` (tên đầy đủ `mcp__repo-pane__<tool>`). Bạn nhờ Claude "tạo repo rồi push" hay "mở pull request", Claude làm bằng tài khoản đã đăng nhập trong plugin.
 
-Token và secret lưu trong macOS Keychain qua `git credential`. Plugin không ghi chúng ra file nào. Khi plugin chạy git, git chỉ được đọc token, không xoá được nó kể cả khi nhà cung cấp từ chối; tài khoản thiếu hoặc bị từ chối token hiện rõ kèm nút **Đăng nhập lại**.
+Token và secret lưu trong macOS Keychain qua `git credential`. Plugin không ghi chúng ra file nào. Khi plugin chạy git, git chỉ được đọc token, không xoá được nó kể cả khi nhà cung cấp từ chối; tài khoản thiếu hoặc bị từ chối token hiện rõ kèm nút **Đăng nhập lại**. Khi git bị từ chối, plugin hỏi API của nhà cung cấp để phân biệt token hỏng với repo không có quyền, nên một repo không vào được không làm tài khoản báo lỗi.
 
 ## Cài đặt
 

@@ -207,7 +207,7 @@ export function credentialRewriteArgs(remoteV: string, accounts: readonly NetAcc
       rewrites.set(m[1], `git@${host}:`)
       continue
     }
-    if (user === account.gitUser || (!user && account.method === 'token')) continue
+    if (user === account.gitUser) continue
     rewrites.set(m[1], `https://${encodeURIComponent(account.gitUser)}@${host}/`)
   }
   return [...rewrites].flatMap(([prefix, to]) => ['-c', `url.${to}.insteadOf=${prefix}`])
@@ -251,6 +251,18 @@ export function rewriteRemoteUrl(oldUrl: string, newUrl: string): string | null 
 /** Whether a fetch error means the remote repo is gone or out of reach (renamed, transferred, deleted, no access). */
 export function isRemoteGone(text: string): boolean {
   return /Repository not found|repository .* not found|does not exist|You may not have access|Could not read from remote|HTTP 404|not found|không có quyền truy cập repo/i.test(text)
+}
+
+/**
+ * The user name a plugin-saved token is stored and sent under. It is the plugin's own, so other git tools
+ * (an editor's auto-fetch, SourceTree, a terminal) never find it under the remote's user name, and never
+ * erase it when the provider refuses them. Bitbucket API tokens take the fixed name
+ * `x-bitbucket-api-token-auth`; GitHub accepts any name with a token.
+ */
+export function tokenGitUser(provider: 'bitbucket' | 'github' | 'gitlab', username: string): string {
+  if (provider === 'bitbucket') return 'x-bitbucket-api-token-auth'
+  if (provider === 'github') return `repo-pane-${username}`
+  return username
 }
 
 /** The hosts a repo's remotes point at. */
@@ -354,4 +366,46 @@ export function ago(at: number | null, now: number): string {
 
 export function shortDate(iso: string): string {
   return iso ? iso.slice(0, 10) : ''
+}
+
+export type LocalGroup<R, A> = { key: string; account: A | null; host: string; repos: R[] }
+
+/**
+ * Watched repos gathered by the signed-in account they belong to, in the accounts' order: the account whose
+ * remote list holds the repo, else the one named like the repo's owner on that host, else the host's account.
+ * Then repos on hosts with no account (one group per host), then repos with no remote.
+ */
+export function groupReposByAccount<R extends { name: string; remote: string | null }, A extends NetAccount & { id: string; username: string }>(
+  repos: readonly R[],
+  accounts: readonly A[],
+  seen: Readonly<Record<string, readonly string[]>>,
+): LocalGroup<R, A>[] {
+  const byKey = new Map<string, LocalGroup<R, A>>()
+  for (const a of accounts) byKey.set(a.id, { key: a.id, account: a, host: a.host, repos: [] })
+  const hostOnly: LocalGroup<R, A>[] = []
+  const none: LocalGroup<R, A> = { key: '', account: null, host: '', repos: [] }
+  for (const repo of repos) {
+    const parts = repo.remote ? repo.remote.split('/') : []
+    const host = parts.length >= 3 ? parts[0] ?? '' : ''
+    if (!host || !repo.remote) {
+      none.repos.push(repo)
+      continue
+    }
+    const owner = parts.slice(1, -1).join('/')
+    const onHost = accounts.filter(a => a.host === host)
+    const holders = onHost.filter(a => seen[a.id]?.includes(repo.remote ?? ''))
+    const named = (list: readonly A[]) => list.find(a => a.username.toLowerCase() === owner)
+    const a = named(holders) ?? holders[0] ?? named(onHost) ?? accountForHost(onHost, host)
+    if (a) {
+      byKey.get(a.id)?.repos.push(repo)
+      continue
+    }
+    const key = `host:${host}`
+    let hg = hostOnly.find(x => x.key === key)
+    if (!hg) hostOnly.push((hg = { key, account: null, host, repos: [] }))
+    hg.repos.push(repo)
+  }
+  const groups = [...byKey.values(), ...hostOnly.sort((x, y) => x.host.localeCompare(y.host)), none].filter(x => x.repos.length > 0)
+  for (const x of groups) x.repos.sort((p, q) => p.name.localeCompare(q.name))
+  return groups
 }
