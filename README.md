@@ -26,6 +26,8 @@ Một plugin cho Claude Code (terminal và app desktop) để làm việc với 
   - Chọn giao thức HTTPS hoặc SSH cho từng tài khoản. Remote của repo và `~/.ssh/config` không bị sửa.
 - **Tool cho Claude**: `status`, `accounts`, `publish`, `push`, `pull`, `fetch`, `create_pull_request` (tên đầy đủ `mcp__repo-pane__<tool>`). Bạn nhờ Claude "tạo repo rồi push" hay "mở pull request", Claude làm bằng tài khoản đã đăng nhập trong plugin.
 
+Mỗi phiên Claude đang mở đều nạp plugin, nên việc đọc trạng thái và fetch định kỳ được chia sẻ giữa các phiên (một phiên chạy git, các phiên khác dùng lại kết quả), chạy tối đa 4 lệnh git cùng lúc, và phiên chạy nền chỉ đọc lại 5 phút một lần.
+
 Token và secret lưu trong macOS Keychain qua `git credential`. Plugin không ghi chúng ra file nào. Khi plugin chạy git, git chỉ được đọc token, không xoá được nó kể cả khi nhà cung cấp từ chối; tài khoản thiếu hoặc bị từ chối token hiện rõ kèm nút **Đăng nhập lại**. Khi git bị từ chối, plugin hỏi API của nhà cung cấp để phân biệt token hỏng với repo không có quyền, nên một repo không vào được không làm tài khoản báo lỗi.
 
 ## Cài đặt

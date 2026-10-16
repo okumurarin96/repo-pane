@@ -13,7 +13,7 @@ import {
   READ_ONLY_CREDENTIALS, credentialRewriteArgs, tokenGitUser, isRemoteGone, parseMovedNotice, rewriteRemoteUrl, parseKeyFingerprint, remoteHosts, sshArgv, sshCommand, sshGreeting,
   diffHunks, explainNetworkError, isAuthError, isClean, isValidRemoteUrl, parseBranches, parseLog, parseRemoteBranches,
   parseRemoteUrl, parseRemotes, parseStashes, parseStatus, parseTags, parseWorktreeList, remoteKey, shortDate,
-  sshRewriteArgs, truncateLines, worktreeFolder, worktreeLabel, groupReposByAccount, sshHost,
+  sshRewriteArgs, truncateLines, worktreeFolder, worktreeLabel, groupReposByAccount, sshHost, mapLimit,
 } from './git'
 import { GRAPH_FORMAT, graphSvg, parseGraphLog } from './graph'
 import {
@@ -33,6 +33,15 @@ const FILE_PAGE = 10
 // folders a repo scan never goes into: dependencies, caches and tool installs
 const SCAN_SKIP = ['node_modules', 'Library', '.Trash', 'Pods', '.nvm', '.cache', '.pub-cache', 'fvm', '.gradle', '.m2', '.cargo', '.rustup', '.pyenv', '.rbenv', '.npm']
 const REMOTE_PAGE = 15
+// pacing: every open Claude session loads the plugin, so the work is shared and slowed where nobody looks
+/** git commands run at once by a refresh or a fetch of every repo. */
+const GIT_JOBS = 4
+/** A session whose pane and band have not been drawn for this long is in the background. */
+const IDLE_AFTER_MS = 90_000
+/** How often a background session re-reads its repos. */
+const IDLE_REFRESH_MS = 5 * 60_000
+/** How long a scan of the home folder (by any session) stands before the next one. */
+const SCAN_EVERY_MS = 12 * 60 * 60_000
 const LOCAL_PAGE = 15
 /** The last lines of a result's output shown when it is opened. */
 const RESULT_LINES = 30
@@ -95,6 +104,11 @@ type Run = { exitCode: number; stdout: string; stderr: string }
 let cfg: Config = { repos: [], cloneDir: '', useSsh: true, home: '', apps: [] }
 /** Repos cloned or watched from the pane, kept across sessions in the plugin's store. */
 let extraRepos: string[] = []
+// the plugin settings' pacing (set by register) and when this session last drew or re-read its repos
+let refreshMs = 30_000
+let fetchMs = 5 * 60_000
+let lastSeenAt = 0
+let lastRefreshAt = 0
 let isRefreshing = false
 
 /** Repos from the settings moved to another folder from the pane (old path → new), and ones hidden there. */
@@ -472,8 +486,7 @@ async function readWorktree($: EngineInterface, repoPath: string, wtPath: string
 
 async function readRepo($: EngineInterface, path: string, fetchError: string | null, lastRemote: string | null = null): Promise<RepoStatus> {
   const name = path.split('/').pop() || path
-  const exists = await $.process.run(['test', '-d', path]).catch(() => ({ exitCode: 1 }))
-  if (exists.exitCode !== 0) {
+  if (!(await $.fs.exists(path).catch(() => false))) {
     return {
       name, path, remote: lastRemote, worktrees: [], fetchError: null, isMissing: true,
       error: 'Không thấy thư mục này nữa: đã đổi tên, di chuyển hoặc xoá',
@@ -488,19 +501,22 @@ async function readRepo($: EngineInterface, path: string, fetchError: string | n
     return { name, path, remote: key, worktrees: [], fetchError, isMissing: false, error: lastLine(list.stderr) || 'không phải git repo' }
   }
   const entries = parseWorktreeList(list.stdout).filter(w => !w.isBare)
-  const worktrees = await Promise.all(entries.map(w => readWorktree($, path, w.path)))
+  const worktrees = await mapLimit(entries, GIT_JOBS, w => readWorktree($, path, w.path))
   return { name, path, remote: key, worktrees, fetchError, isMissing: false, error: null }
 }
 
 async function refresh($: EngineInterface) {
   if (isRefreshing) return
   isRefreshing = true
+  lastRefreshAt = Date.now()
   try {
     const prev = await read($, repos)
     const before = new Map(prev.map(r => [r.path, r]))
-    const list = await Promise.all(allPaths().map(p => readRepo($, p, before.get(p)?.fetchError ?? null, before.get(p)?.remote ?? null)))
+    const list = await mapLimit(allPaths(), GIT_JOBS, p => readRepo($, p, before.get(p)?.fetchError ?? null, before.get(p)?.remote ?? null))
     await update($, repos, () => list)
     await update($, refreshedAt, () => Date.now())
+    // the other open sessions take this read instead of running git themselves (adoptSharedStatus)
+    await $.store.set('status', { at: lastRefreshAt, repos: list }).catch(() => undefined)
     if ((await read($, view)) === 'repo') await loadPanel($, false)
   } finally {
     isRefreshing = false
@@ -615,24 +631,83 @@ async function readSettings($: EngineInterface, path: string): Promise<RepoSetti
 // ── fetch / pull / push ────────────────────────────────────────────────────
 
 async function fetchRepo($: EngineInterface, path: string): Promise<string | null> {
-  if ((await $.process.run(['test', '-d', path]).catch(() => ({ exitCode: 1 }))).exitCode !== 0) return null
+  if (!(await $.fs.exists(path).catch(() => false))) return null
   // not --quiet: the provider's "repository moved" notice comes on stderr (gitNet records it)
   const r = await gitNet($, path, ['fetch', '--all', '--prune'])
   return r.exitCode === 0 ? null : explainNetworkError(lastLine(r.stderr) || `exit ${r.exitCode}`)
 }
 
-async function fetchAll($: EngineInterface) {
+/**
+ * `git fetch` of every watched repo, a few at a time. The timer of every open session calls it with
+ * `isScheduled`: the first one due fetches and stamps the store, the others take its time and errors.
+ */
+async function fetchAll($: EngineInterface, isScheduled = false) {
   const info = withDefaults(DEFAULT_FETCH, await read($, fetchInfo))
   if (info.isRunning) return
+  if (isScheduled) {
+    const shared = await $.store.get('fetched')
+    const last = shared && typeof shared === 'object' ? (shared as { at?: unknown; errors?: unknown }) : {}
+    const at = typeof last.at === 'number' ? last.at : 0
+    if (Date.now() - at < fetchMs * 0.9) {
+      if (at > (info.at ?? 0)) {
+        const errors = last.errors && typeof last.errors === 'object' ? (last.errors as Record<string, string | null>) : {}
+        await update($, repos, list => list.map(r => (r.path in errors ? { ...r, fetchError: errors[r.path] ?? null } : r)))
+        await update($, fetchInfo, f => ({ ...f, at, failed: Object.values(errors).filter(Boolean).length }))
+      }
+      return
+    }
+  }
+  await $.store.set('fetched', { at: Date.now(), errors: {} })
   await update($, fetchInfo, f => ({ ...f, isRunning: true }))
   const paths = allPaths()
-  const results = await Promise.all(paths.map(p => fetchRepo($, p)))
-  const errors = new Map(paths.map((p, i) => [p, results[i]]))
+  const results = await mapLimit(paths, GIT_JOBS, p => fetchRepo($, p))
+  const errors = new Map(paths.map((p, i) => [p, results[i] ?? null]))
   const failed = results.filter(Boolean).length
+  const at = Date.now()
+  await $.store.set('fetched', { at, errors: Object.fromEntries(errors) })
   await update($, repos, list => list.map(r => (errors.has(r.path) ? { ...r, fetchError: errors.get(r.path) ?? null } : r)))
-  await update($, fetchInfo, () => ({ at: Date.now(), isRunning: false, failed }))
+  await update($, fetchInfo, () => ({ at, isRunning: false, failed }))
   await refresh($)
-  if (failed > 0) void $.ui.toast(`git fetch lỗi ở ${failed} repo`)
+  if (failed > 0 && !isScheduled) void $.ui.toast(`git fetch lỗi ở ${failed} repo`)
+}
+
+/** The refresh timer: every tick while the pane or band is being looked at, rarely in a background session. */
+async function tick($: EngineInterface) {
+  const now = Date.now()
+  if (now - lastSeenAt > IDLE_AFTER_MS && now - lastRefreshAt < IDLE_REFRESH_MS) return
+  if (await adoptSharedStatus($)) return
+  await refresh($)
+}
+
+/**
+ * Takes the repo statuses another session read moments ago (same repos), so one `git status` sweep
+ * serves every open session. False when there is none fresh enough, and this session reads them itself.
+ */
+async function adoptSharedStatus($: EngineInterface): Promise<boolean> {
+  const kept = await $.store.get('status').catch(() => undefined)
+  if (!kept || typeof kept !== 'object') return false
+  const { at, repos: shared } = kept as { at?: unknown; repos?: unknown }
+  if (typeof at !== 'number' || at <= lastRefreshAt || Date.now() - at > refreshMs * 0.8 || !Array.isArray(shared)) return false
+  const paths = allPaths()
+  const list = shared as RepoStatus[]
+  if (list.length !== paths.length || list.some((r, i) => r?.path !== paths[i] || !Array.isArray(r?.worktrees))) return false
+  lastRefreshAt = at
+  await update($, repos, () => list)
+  await update($, refreshedAt, () => at)
+  if ((await read($, view)) === 'repo') await loadPanel($, false)
+  return true
+}
+
+/** The scan of the home folder at session start: one per SCAN_EVERY_MS across sessions, the rest reuse it. */
+async function scanHomeQuietly($: EngineInterface) {
+  const kept = await $.store.get('homeScan')
+  const last = kept && typeof kept === 'object' ? (kept as { at?: unknown; root?: unknown; found?: unknown }) : {}
+  if (typeof last.at === 'number' && Date.now() - last.at < SCAN_EVERY_MS && last.root === cfg.home && Array.isArray(last.found)) {
+    const found = last.found.filter((p): p is string => typeof p === 'string')
+    await update($, scan, () => ({ isLoading: false, root: cfg.home, found }))
+    return
+  }
+  await scanRepos($, cfg.home, true)
 }
 
 async function fetchOne($: EngineInterface, repoPath: string) {
@@ -2283,6 +2358,7 @@ async function scanRepos($: EngineInterface, rootIn?: string, quiet = false) {
   // a worktree or submodule inside a repo is reached through that repo
   const found = dirs.filter(p => !dirs.some(q => q !== p && p.startsWith(`${q}/`)))
   await update($, scan, () => ({ isLoading: false, root, found }))
+  if (root === cfg.home && r.exitCode === 0) await $.store.set('homeScan', { at: Date.now(), root, found })
   if (found.length === 0 && !quiet) void $.ui.toast(`Không thấy repo nào trong ${root}`)
 }
 
@@ -2705,8 +2781,8 @@ export const register: Register = (on, options) => {
     home: '',
     apps: sharedApps(options),
   }
-  const fetchMinutes = Number(options.fetchMinutes ?? 5)
-  const refreshSeconds = Math.max(5, Number(options.refreshSeconds ?? 30))
+  fetchMs = Math.max(0, Number(options.fetchMinutes ?? 5)) * 60_000
+  refreshMs = Math.max(5, Number(options.refreshSeconds ?? 30)) * 1000
 
   on('session.start', async ($, e, next) => {
     await $.command.register({ name: 'repo-pane', description: 'Mở Repo Pane (trạng thái repo, branch, commit, PR…)' })
@@ -2735,14 +2811,14 @@ export const register: Register = (on, options) => {
     const storedIgnored = await $.store.get('ignoredRepos')
     ignoredRepos = Array.isArray(storedIgnored) ? storedIgnored.filter((p): p is string => typeof p === 'string') : []
     // look for repos on this machine that are not watched yet (offered at the top of the repo list)
-    if (cfg.home) void scanRepos($, cfg.home, true)
+    if (cfg.home) void scanHomeQuietly($)
     void $.ui.open({ id: PANE, title: TITLE })
 
     void refresh($)
-    $.clock.every(refreshSeconds * 1000, () => void refresh($))
-    if (fetchMinutes > 0) {
-      $.clock.after(3_000, () => void fetchAll($))
-      $.clock.every(fetchMinutes * 60_000, () => void fetchAll($))
+    $.clock.every(refreshMs, () => void tick($))
+    if (fetchMs > 0) {
+      $.clock.after(3_000, () => void fetchAll($, true))
+      $.clock.every(fetchMs, () => void fetchAll($, true))
     }
 
     return next(e)
@@ -2765,7 +2841,10 @@ export const register: Register = (on, options) => {
   // One line above the prompt: what needs attention, and a button that opens the pane.
   on('ui.render', { component: 'AbovePrompt' }, async ($, e, next) => {
     if (e.props.hasSurvey) return next(e)
+    lastSeenAt = Date.now()
     const { Box, Text, Button } = $.ui.resolve(e)
+    // read so every refresh draws the band again, which keeps a session being looked at marked as seen
+    await read($, refreshedAt)
     const list = await read($, repos)
     const info = withDefaults(DEFAULT_FETCH, await read($, fetchInfo))
     const all = list.flatMap(r => r.worktrees)
@@ -2790,6 +2869,7 @@ export const register: Register = (on, options) => {
   })
 
   on('ui.render', { component: 'Pane', requestId: PANE }, async ($, e) => {
+    lastSeenAt = Date.now()
     const ui = $.ui.resolve(e)
     const { Box, Text, Button, Code, Link } = ui
     // Chosen by surface, not by what the table object holds: the mobile app draws no field (forms are left

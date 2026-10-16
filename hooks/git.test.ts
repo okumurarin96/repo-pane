@@ -4,7 +4,7 @@ import {
   READ_ONLY_CREDENTIALS, tokenGitUser, isRemoteGone, parseMovedNotice, rewriteRemoteUrl, cloneFolder, credentialRewriteArgs, diffHunks, parseKeyFingerprint, remoteHosts, sshArgv, sshCommand, sshGreeting, isAuthError, isClean, isValidRemoteUrl, parseBranches, parseLog, parseRemoteBranches,
   parseRemotes, parseRemoteUrl, parseStashes, parseStatus, parseTags, parseWorktreeList, remoteKey, sshRewriteArgs,
   worktreeFolder, worktreeLabel,
-  groupReposByAccount, sshHost, sshUrlFor, webHost,
+  groupReposByAccount, sshHost, sshUrlFor, webHost, mapLimit,
 } from './git'
 
 const U = '\x1f'
@@ -193,4 +193,19 @@ test('Bitbucket SSH goes to ssh.bitbucket.org, and its remotes still match bitbu
   expect(remoteKey('https://alice@bitbucket.org/acme/web.git')).toBe('bitbucket.org/acme/web')
   expect(sshRewriteArgs('origin\thttps://alice@bitbucket.org/acme/web.git (fetch)')).toEqual(['-c', 'url.git@ssh.bitbucket.org:.insteadOf=https://alice@bitbucket.org/'])
   expect(rewriteRemoteUrl('git@ssh.bitbucket.org:acme/old.git', 'https://bitbucket.org/acme/new')).toBe('git@ssh.bitbucket.org:acme/new.git')
+})
+
+test('mapLimit keeps the order and never runs more than the limit at once', async () => {
+  let running = 0
+  let most = 0
+  const out = await mapLimit([5, 1, 4, 2, 3, 0], 2, async n => {
+    running++
+    most = Math.max(most, running)
+    for (let k = 0; k < n; k++) await Promise.resolve()
+    running--
+    return n * 10
+  })
+  expect(out).toEqual([50, 10, 40, 20, 30, 0])
+  expect(most).toBe(2)
+  expect(await mapLimit([], 4, async (n: number) => n)).toEqual([])
 })

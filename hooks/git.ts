@@ -429,3 +429,17 @@ export function groupReposByAccount<R extends { name: string; remote: string | n
   for (const x of groups) x.repos.sort((p, q) => p.name.localeCompare(q.name))
   return groups
 }
+
+/** Runs `fn` over `items` with at most `limit` running at once; the results keep the items' order. */
+export async function mapLimit<T, R>(items: readonly T[], limit: number, fn: (item: T) => Promise<R>): Promise<R[]> {
+  const out: R[] = new Array<R>(items.length)
+  let next = 0
+  const worker = async () => {
+    while (next < items.length) {
+      const i = next++
+      out[i] = await fn(items[i] as T)
+    }
+  }
+  await Promise.all(Array.from({ length: Math.max(1, Math.min(limit, items.length)) }, worker))
+  return out
+}
