@@ -13,7 +13,7 @@ import {
   READ_ONLY_CREDENTIALS, credentialRewriteArgs, tokenGitUser, isRemoteGone, parseMovedNotice, rewriteRemoteUrl, parseKeyFingerprint, remoteHosts, sshArgv, sshCommand, sshGreeting,
   diffHunks, explainNetworkError, isAuthError, isClean, isValidRemoteUrl, parseBranches, parseLog, parseRemoteBranches,
   parseRemoteUrl, parseRemotes, parseStashes, parseStatus, parseTags, parseWorktreeList, remoteKey, shortDate,
-  sshRewriteArgs, truncateLines, worktreeFolder, worktreeLabel, groupReposByAccount,
+  sshRewriteArgs, truncateLines, worktreeFolder, worktreeLabel, groupReposByAccount, sshHost,
 } from './git'
 import { GRAPH_FORMAT, graphSvg, parseGraphLog } from './graph'
 import {
@@ -1899,7 +1899,7 @@ async function copyPublicKey($: EngineInterface, keyPath: string) {
 async function testSsh($: EngineInterface, host: string, key: string): Promise<{ ok: boolean; username: string }> {
   await update($, ssh, s => ({ ...s, isTesting: true }))
   // accept-new records a host seen for the first time, so later git commands in BatchMode get through
-  const r = await $.process.run([...sshArgv(key, true), '-T', `git@${host}`], { timeoutMs: 30_000 })
+  const r = await $.process.run([...sshArgv(key, true), '-T', `git@${sshHost(host)}`], { timeoutMs: 30_000 })
     .catch(err => ({ exitCode: 1, stdout: '', stderr: String(err) }))
   const text = [r.stdout, r.stderr].join('\n').trim()
   const g = sshGreeting(text)
@@ -3877,7 +3877,7 @@ export const register: Register = (on, options) => {
                 {Input && (
                   <Box flexDirection="column">
                     {draftInput(`remotename:${repo.path}`, 'Thêm remote: tên', 'upstream')}
-                    {draftInput(`remoteurl:${repo.path}`, 'URL', 'git@bitbucket.org:workspace/repo.git')}
+                    {draftInput(`remoteurl:${repo.path}`, 'URL', 'git@ssh.bitbucket.org:workspace/repo.git')}
                     <Button key="remote-add" label="Thêm remote" onPress={() => void addRemote($, repo.path)} />
                   </Box>
                 )}

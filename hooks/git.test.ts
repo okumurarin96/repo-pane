@@ -4,7 +4,7 @@ import {
   READ_ONLY_CREDENTIALS, tokenGitUser, isRemoteGone, parseMovedNotice, rewriteRemoteUrl, cloneFolder, credentialRewriteArgs, diffHunks, parseKeyFingerprint, remoteHosts, sshArgv, sshCommand, sshGreeting, isAuthError, isClean, isValidRemoteUrl, parseBranches, parseLog, parseRemoteBranches,
   parseRemotes, parseRemoteUrl, parseStashes, parseStatus, parseTags, parseWorktreeList, remoteKey, sshRewriteArgs,
   worktreeFolder, worktreeLabel,
-  groupReposByAccount,
+  groupReposByAccount, sshHost, sshUrlFor, webHost,
 } from './git'
 
 const U = '\x1f'
@@ -78,7 +78,7 @@ test('remote URLs: parse, key, SSH rewrite and validation', async () => {
     'ssh\tgit@github.com:a/b.git (fetch)',
   ].join('\n')
   expect(sshRewriteArgs(remoteV)).toEqual([
-    '-c', 'url.git@bitbucket.org:.insteadOf=https://alice@bitbucket.org/',
+    '-c', 'url.git@ssh.bitbucket.org:.insteadOf=https://alice@bitbucket.org/',
     '-c', 'url.git@github.com:.insteadOf=https://github.com/',
   ])
   expect(parseRemotes(remoteV).map(r => r.name)).toEqual(['origin', 'gh', 'ssh'])
@@ -119,7 +119,7 @@ test('credential rewrite sends a signed-in account\'s git user, leaving the remo
   expect(tokenGitUser('gitlab', 'me')).toBe('me')
   // an account set to SSH sends the host's https remotes over SSH
   expect(credentialRewriteArgs(remoteV, [{ host: 'bitbucket.org', gitUser: 'git', method: 'ssh', protocol: 'ssh', sshKey: '/k' }]))
-    .toEqual(['-c', 'url.git@bitbucket.org:.insteadOf=https://alice@bitbucket.org/'])
+    .toEqual(['-c', 'url.git@ssh.bitbucket.org:.insteadOf=https://alice@bitbucket.org/'])
   expect(remoteHosts(remoteV)).toEqual(['bitbucket.org', 'gitlab.example.com', 'github.com'])
 })
 
@@ -178,4 +178,19 @@ test('watched repos are grouped by the account they belong to', async () => {
     ['host:gitlab.com', ['app']],
     ['', ['local']],
   ])
+})
+
+test('Bitbucket SSH goes to ssh.bitbucket.org, and its remotes still match bitbucket.org', async () => {
+  expect(sshHost('bitbucket.org')).toBe('ssh.bitbucket.org')
+  expect(sshHost('github.com')).toBe('github.com')
+  expect(webHost('ssh.bitbucket.org')).toBe('bitbucket.org')
+  expect(sshUrlFor('git@bitbucket.org:acme/web.git')).toBe('git@ssh.bitbucket.org:acme/web.git')
+  expect(sshUrlFor('ssh://git@bitbucket.org/acme/web.git')).toBe('ssh://git@ssh.bitbucket.org/acme/web.git')
+  expect(sshUrlFor('git@ssh.bitbucket.org:acme/web.git')).toBe('git@ssh.bitbucket.org:acme/web.git')
+  expect(sshUrlFor('git@github.com:octo/tool.git')).toBe('git@github.com:octo/tool.git')
+  expect(sshUrlFor('')).toBe('')
+  expect(remoteKey('git@ssh.bitbucket.org:Acme/Web.git')).toBe('bitbucket.org/acme/web')
+  expect(remoteKey('https://alice@bitbucket.org/acme/web.git')).toBe('bitbucket.org/acme/web')
+  expect(sshRewriteArgs('origin\thttps://alice@bitbucket.org/acme/web.git (fetch)')).toEqual(['-c', 'url.git@ssh.bitbucket.org:.insteadOf=https://alice@bitbucket.org/'])
+  expect(rewriteRemoteUrl('git@ssh.bitbucket.org:acme/old.git', 'https://bitbucket.org/acme/new')).toBe('git@ssh.bitbucket.org:acme/new.git')
 })

@@ -149,13 +149,33 @@ export function parseRemotes(remoteV: string): RemoteUrl[] {
   return [...byName.values()]
 }
 
-/** `{ host, path }` of an https, `ssh://` or `git@host:path` remote URL. */
+/** Hosts that serve git over SSH under another name (Bitbucket moved SSH to ssh.bitbucket.org on 2026-11-12). */
+const SSH_HOSTS: Readonly<Record<string, string>> = { 'bitbucket.org': 'ssh.bitbucket.org' }
+
+/** The host to reach over SSH for a web host. */
+export function sshHost(host: string): string {
+  const h = host.toLowerCase()
+  return SSH_HOSTS[h] ?? h
+}
+
+/** The web host an SSH host stands for, so `ssh.bitbucket.org` remotes match their account and repo. */
+export function webHost(host: string): string {
+  const h = host.toLowerCase()
+  return Object.entries(SSH_HOSTS).find(([, s]) => s === h)?.[0] ?? h
+}
+
+/** An SSH remote URL on the host that serves SSH now (`git@bitbucket.org:` becomes `git@ssh.bitbucket.org:`). */
+export function sshUrlFor(url: string): string {
+  return url.replace(/^((?:ssh:\/\/)?[^@\s/]+@)([^:/\s]+)/, (_, user: string, host: string) => `${user}${sshHost(host)}`)
+}
+
+/** `{ host, path }` of an https, `ssh://` or `git@host:path` remote URL; an SSH-only host is read as its web host. */
 export function parseRemoteUrl(url: string): { host: string; path: string } | null {
   const u = url.trim()
   const m =
     /^(?:https?|ssh):\/\/(?:[^@/]+@)?([^/:]+)(?::\d+)?\/(.+?)(?:\.git)?\/?$/.exec(u) ??
     /^[^@\s]+@([^:\s]+):(.+?)(?:\.git)?\/?$/.exec(u)
-  return m ? { host: (m[1] ?? '').toLowerCase(), path: m[2] ?? '' } : null
+  return m ? { host: webHost(m[1] ?? ''), path: m[2] ?? '' } : null
 }
 
 /** `host/owner/repo` of a remote URL, lowercased: what local and remote repos are matched on. */
@@ -173,7 +193,7 @@ export function sshRewriteArgs(remoteV: string): string[] {
   for (const line of remoteV.split('\n')) {
     const url = line.split(/\s+/)[1] ?? ''
     const m = /^(https:\/\/(?:[^@/]+@)?([^/:]+)\/)/.exec(url)
-    if (m?.[1] && m[2]) rewrites.set(m[1], `git@${m[2]}:`)
+    if (m?.[1] && m[2]) rewrites.set(m[1], `git@${sshHost(m[2])}:`)
   }
   return [...rewrites].flatMap(([prefix, ssh]) => ['-c', `url.${ssh}.insteadOf=${prefix}`])
 }
@@ -204,7 +224,7 @@ export function credentialRewriteArgs(remoteV: string, accounts: readonly NetAcc
     if (!account) continue
     // an account set to SSH sends this host's https remotes over SSH
     if (account.protocol === 'ssh') {
-      rewrites.set(m[1], `git@${host}:`)
+      rewrites.set(m[1], `git@${sshHost(host)}:`)
       continue
     }
     if (user === account.gitUser) continue
@@ -243,7 +263,7 @@ export function rewriteRemoteUrl(oldUrl: string, newUrl: string): string | null 
   if (!next) return null
   const path = next.path.replace(/\.git$/, '')
   const old = oldUrl.trim()
-  if (/^(git@|ssh:\/\/)/.test(old)) return `git@${next.host}:${path}.git`
+  if (/^(git@|ssh:\/\/)/.test(old)) return `git@${sshHost(next.host)}:${path}.git`
   const user = /^https?:\/\/([^@/]+)@/.exec(old)?.[1]
   return `https://${user ? `${user}@` : ''}${next.host}/${path}.git`
 }

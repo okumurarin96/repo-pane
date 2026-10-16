@@ -1,4 +1,5 @@
 import type { Account, Provider, PullRequest, RemoteRepo } from '../types'
+import { sshUrlFor } from './git'
 
 export const PROVIDERS: { value: Provider; label: string; host: string }[] = [
   { value: 'bitbucket', label: 'Bitbucket', host: 'bitbucket.org' },
@@ -154,7 +155,7 @@ export function parseRepoPage(a: Account, text: string, headers: Record<string, 
         mainBranch: v.mainbranch?.name ?? '',
         updatedOn: v.updated_on ?? '',
         isPrivate: v.is_private ?? true,
-        sshUrl: clone.find(c => c.name === 'ssh')?.href ?? `git@${host}:${fullName}.git`,
+        sshUrl: sshUrlFor(clone.find(c => c.name === 'ssh')?.href ?? `git@${host}:${fullName}.git`),
         httpsUrl: stripUser(clone.find(c => c.name === 'https')?.href ?? `https://${host}/${fullName}.git`),
       }
     })
@@ -175,7 +176,7 @@ export function parseRepoPage(a: Account, text: string, headers: Record<string, 
         mainBranch: v.default_branch ?? '',
         updatedOn: v.pushed_at ?? v.updated_at ?? '',
         isPrivate: v.private ?? true,
-        sshUrl: v.ssh_url ?? `git@${host}:${fullName}.git`,
+        sshUrl: sshUrlFor(v.ssh_url ?? `git@${host}:${fullName}.git`),
         httpsUrl: v.clone_url ?? `https://${host}/${fullName}.git`,
       }
     })
@@ -195,7 +196,7 @@ export function parseRepoPage(a: Account, text: string, headers: Record<string, 
       mainBranch: v.default_branch ?? '',
       updatedOn: v.last_activity_at ?? '',
       isPrivate: v.visibility !== 'public',
-      sshUrl: v.ssh_url_to_repo ?? `git@${host}:${fullName}.git`,
+      sshUrl: sshUrlFor(v.ssh_url_to_repo ?? `git@${host}:${fullName}.git`),
       httpsUrl: v.http_url_to_repo ?? `https://${host}/${fullName}.git`,
     }
   })
@@ -525,6 +526,6 @@ export function parseCreatedRepo(p: Provider, text: string): { webUrl: string; h
   return {
     webUrl: v.links?.html?.href ?? '',
     httpsUrl: (clone.find(c => c.name === 'https')?.href ?? '').replace(/\/\/[^@/]+@/, '//'),
-    sshUrl: clone.find(c => c.name === 'ssh')?.href ?? '',
+    sshUrl: sshUrlFor(clone.find(c => c.name === 'ssh')?.href ?? ''),
   }
 }

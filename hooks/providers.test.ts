@@ -95,7 +95,7 @@ test('parses repo pages of the three providers', async () => {
   expect(bb.next).toBe('https://api.bitbucket.org/next')
   expect(bb.repos[0]).toMatchObject({
     key: 'bitbucket.org/acme/web-app-router', slug: 'web-app-router', mainBranch: 'release',
-    httpsUrl: 'https://bitbucket.org/acme/web-app-router.git', sshUrl: 'git@bitbucket.org:acme/web-app-router.git',
+    httpsUrl: 'https://bitbucket.org/acme/web-app-router.git', sshUrl: 'git@ssh.bitbucket.org:acme/web-app-router.git',
   })
   const gh = parseRepoPage(GH, JSON.stringify([{ name: 'Hello', full_name: 'octo/Hello', default_branch: 'main', owner: { login: 'octo' }, clone_url: 'https://github.com/octo/Hello.git' }]),
     { link: '<https://api.github.com/user/repos?page=2>; rel="next", <https://api.github.com/user/repos?page=5>; rel="last"' })
@@ -134,7 +134,7 @@ test('publish: create-repo requests and responses for the three providers', asyn
   expect(parseCreatedRepo('github', JSON.stringify({ html_url: 'https://github.com/o/r', clone_url: 'https://github.com/o/r.git', ssh_url: 'git@github.com:o/r.git' })))
     .toEqual({ webUrl: 'https://github.com/o/r', httpsUrl: 'https://github.com/o/r.git', sshUrl: 'git@github.com:o/r.git' })
   expect(parseCreatedRepo('bitbucket', JSON.stringify({ links: { html: { href: 'https://bitbucket.org/acme/r' }, clone: [{ name: 'https', href: 'https://alice@bitbucket.org/acme/r.git' }, { name: 'ssh', href: 'git@bitbucket.org:acme/r.git' }] } })))
-    .toEqual({ webUrl: 'https://bitbucket.org/acme/r', httpsUrl: 'https://bitbucket.org/acme/r.git', sshUrl: 'git@bitbucket.org:acme/r.git' })
+    .toEqual({ webUrl: 'https://bitbucket.org/acme/r', httpsUrl: 'https://bitbucket.org/acme/r.git', sshUrl: 'git@ssh.bitbucket.org:acme/r.git' })
   expect(parseOwners('github', JSON.stringify([{ login: 'acme-org' }]))).toEqual(['acme-org'])
   expect(parseOwners('gitlab', JSON.stringify([{ full_path: 'team/web' }]))).toEqual(['team/web'])
   expect(ownersUrl(GL)).toBe('https://gitlab.example.com/api/v4/groups?min_access_level=30&per_page=100')
