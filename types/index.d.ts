@@ -1,3 +1,6 @@
+// Copyright 2026 okumurarin96
+// SPDX-License-Identifier: Apache-2.0
+
 export type ChangedFile = {
   /** Two-letter status as `git status --short` prints it (`M `, ` M`, `??`, `UU`...). */
   code: string

@@ -65,10 +65,33 @@ Có thể nhập các giá trị này ngay trong tab Tài khoản thay vì sửa
 claude plugin test .
 ```
 
-## Giấy phép
+Muốn đóng góp code, xem [CONTRIBUTING.md](CONTRIBUTING.md).
 
-[Apache License 2.0](LICENSE).
+## Giấy phép và tác giả
 
-## Nhãn hiệu
+Copyright 2026 okumurarin96. Mã nguồn phát hành theo [Apache License 2.0](LICENSE).
 
-Git là nhãn hiệu của Software Freedom Conservancy; dự án này không liên kết với và không được Git Project chứng nhận. GitHub, Bitbucket, GitLab, Sourcetree và Claude là nhãn hiệu của chủ sở hữu tương ứng; các tên này chỉ dùng để mô tả khả năng tương thích.
+Bạn được tự do dùng, sửa, fork, phân phối lại và bán sản phẩm có dùng mã nguồn này, kể cả sản phẩm thương mại, miễn là tuân theo điều kiện của giấy phép, trong đó có:
+
+- kèm bản sao giấy phép (`LICENSE`);
+- giữ nguyên các thông báo bản quyền và ghi nhận tác giả có trong mã nguồn;
+- kèm nội dung ghi nhận trong file [`NOTICE`](NOTICE);
+- ghi rõ trong các file đã sửa rằng bạn đã sửa chúng.
+
+Đoạn trên chỉ tóm tắt; nội dung có hiệu lực là file [LICENSE](LICENSE).
+
+## Tên gọi, logo và bản fork
+
+Giấy phép Apache 2.0 cho phép dùng mã nguồn nhưng **không** cấp quyền dùng tên hay thương hiệu của dự án (Điều 6 của giấy phép). Tóm tắt [chính sách tên gọi](TRADEMARKS.md):
+
+- Được nói sản phẩm của bạn "dựa trên" hoặc "fork từ" Repo Pane for Git, kèm link về repo gốc.
+- Bản fork hoặc sản phẩm phái sinh **phát hành công khai** cần dùng tên khác, không dễ nhầm với "Repo Pane" (ví dụ không dùng "Repo Pane Pro", "RepoPane", "Repo Pane X"), và đổi tên plugin, lệnh `/repo-pane` cùng tiêu đề pane.
+- Không trình bày bản fork như bản chính thức hoặc được tác giả chứng thực.
+
+Bản chính thức chỉ được phát hành từ [github.com/okumurarin96/repo-pane](https://github.com/okumurarin96/repo-pane) và marketplace `okumurarin96/repo-pane`.
+
+## Nhãn hiệu của bên thứ ba
+
+Git và logo Git là nhãn hiệu hoặc nhãn hiệu đã đăng ký của Software Freedom Conservancy, Inc., tổ chức pháp lý của Git Project, tại Hoa Kỳ và/hoặc các quốc gia khác. Tên "Repo Pane for Git" dùng "Git" theo dạng "[Tên sản phẩm] for Git" mà chính sách nhãn hiệu của Git cho phép; dự án này không liên kết với và không được Git Project chứng nhận.
+
+GitHub, Bitbucket, GitLab, Sourcetree, Claude và Claude Code là nhãn hiệu của chủ sở hữu tương ứng; các tên này chỉ dùng để mô tả khả năng tương thích. Repo Pane for Git là dự án cá nhân, không do Anthropic, GitHub, Atlassian hay GitLab phát triển hoặc chứng thực.

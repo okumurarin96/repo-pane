@@ -1,3 +1,6 @@
+// Copyright 2026 okumurarin96
+// SPDX-License-Identifier: Apache-2.0
+
 import type { FlowConfig, FlowKind } from '../types'
 
 /** git-flow's own defaults, the production branch being whichever the repo has. */

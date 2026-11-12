@@ -1,3 +1,6 @@
+// Copyright 2026 okumurarin96
+// SPDX-License-Identifier: Apache-2.0
+
 import type { Branch, ChangedFile, Commit, RemoteBranch, RemoteUrl, Stash, Tag, WorktreeStatus } from '../types'
 
 export type WorktreeEntry = { path: string; isBare: boolean }

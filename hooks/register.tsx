@@ -1,3 +1,6 @@
+// Copyright 2026 okumurarin96
+// SPDX-License-Identifier: Apache-2.0
+
 import { atom, read, update } from 'claude-code'
 import type { EngineInterface, Register } from 'claude-code'
 

@@ -1,3 +1,6 @@
+// Copyright 2026 okumurarin96
+// SPDX-License-Identifier: Apache-2.0
+
 import type { Account, Provider, PullRequest, RemoteRepo } from '../types'
 import { sshUrlFor } from './git'
 
